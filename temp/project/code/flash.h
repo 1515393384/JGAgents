@@ -1,5 +1,5 @@
-#ifndef FLASH_H       // Èç¹û»¹Ã»ÓÐ°üº¬¹ýÕâ¸öÍ·ÎÄ¼þ
-#define FLASH_H       // ×öÒ»¸ö¡°ÒÑ¾­°üº¬¡±µÄ±ê¼Ç
+#ifndef FLASH_H       // ï¿½ï¿½ï¿½ï¿½ï¿½Ã»ï¿½Ð°ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Í·ï¿½Ä¼ï¿½
+#define FLASH_H       // ï¿½ï¿½Ò»ï¿½ï¿½ï¿½ï¿½ï¿½Ñ¾ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ä±ï¿½ï¿½
 
 #include <stdint.h>
 #include "zf_common_headfile.h"
@@ -8,4 +8,4 @@ extern float my_float;
 void flash_init(void);
 void flash_task(void);
 
-#endif              // ½áÊøÕâ´ÎÅÐ¶Ï
+#endif              // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð¶ï¿½

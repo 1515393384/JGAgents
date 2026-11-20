@@ -1,3 +1,4 @@
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -13,6 +14,7 @@ use engine_server_core::db::users::SqliteUserStore;
 use engine_server_core::engine::server::conn::ConnRegistry;
 use engine_server_core::engine::server::http::{build_router, AppState};
 use engine_server_core::engine::user::bootstrap::ensure_bootstrap_admin;
+use engine_server_core::engine::user::token::TokenPepper;
 
 struct SystemClock;
 
@@ -25,6 +27,20 @@ impl Clock for SystemClock {
     }
 }
 
+fn resolve_sibling_path(env_key: &str, db_path: &str, filename: &str) -> PathBuf {
+    if let Ok(explicit) = std::env::var(env_key) {
+        let trimmed = explicit.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed);
+        }
+    }
+    let db_dir = Path::new(db_path)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    db_dir.join(filename)
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
@@ -33,20 +49,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let clock = Arc::new(SystemClock);
     let db_path = std::env::var("DB_PATH").unwrap_or_else(|_| String::from("./data/engine.db"));
+    let pepper_path = resolve_sibling_path("TOKEN_PEPPER_PATH", &db_path, ".token-pepper");
+    let bootstrap_path =
+        resolve_sibling_path("BOOTSTRAP_TOKEN_PATH", &db_path, ".bootstrap-admin-token");
+
+    let pepper = Arc::new(TokenPepper::load_or_init(&pepper_path)?);
     let pool = Arc::new(SqlitePool::open(&db_path)?);
     let schema_ver = migrate(pool.as_ref(), clock.now_ms())?;
     tracing::info!(%db_path, schema_ver, "sqlite initialized");
 
-    let store = Arc::new(SqliteUserStore::new(Arc::clone(&pool)));
+    let users = Arc::new(SqliteUserStore::new(Arc::clone(&pool)));
     let convs = Arc::new(SqliteConvStore::new(Arc::clone(&pool)));
     let ledger = Arc::new(SqliteLedgerStore::new(Arc::clone(&pool)));
+    let health = Arc::clone(&pool);
     let conns = Arc::new(ConnRegistry::default());
 
-    if let Some(admin) = ensure_bootstrap_admin(store.as_ref(), clock.as_ref())? {
+    if let Some(admin) = ensure_bootstrap_admin(
+        users.as_ref(),
+        clock.as_ref(),
+        pepper.as_ref(),
+        Some(&bootstrap_path),
+    )? {
         tracing::info!(
             user_id = %admin.record.id,
-            token = %admin.one_time_token,
-            "bootstrap admin created"
+            token_file = %bootstrap_path.display(),
+            "bootstrap admin created; one-time token written to restricted file"
         );
     }
 
@@ -55,11 +82,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!(%addr, "engine_server_core listening");
 
     let app = build_router(AppState {
-        store,
+        users,
+        convs,
+        ledger,
+        health,
         clock,
-        pool: Some(pool),
-        convs: Some(convs),
-        ledger: Some(ledger),
+        pepper,
         conns,
     });
 

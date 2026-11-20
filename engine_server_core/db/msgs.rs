@@ -1,20 +1,11 @@
 use std::sync::Arc;
 
+use rusqlite::TransactionBehavior;
+
 use crate::core::error::EngineError;
 use crate::core::ids::{ConvId, UserId};
-use crate::core::traits::ConvStore;
+use crate::core::traits::{ArchiveRecord, ConvStore};
 use crate::db::pool::{map_sqlite_err, SqlitePool};
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ArchiveRecord {
-    pub conv_id: String,
-    pub owner_name: String,
-    pub group: String,
-    pub messages: u64,
-    pub prefix_version: u32,
-    pub bytes_kb: u64,
-    pub updated_at_ms: i64,
-}
 
 pub struct SqliteConvStore {
     pool: Arc<SqlitePool>,
@@ -23,54 +14,6 @@ pub struct SqliteConvStore {
 impl SqliteConvStore {
     pub fn new(pool: Arc<SqlitePool>) -> Self {
         Self { pool }
-    }
-
-    pub fn list_archives(&self, limit: usize) -> Result<Vec<ArchiveRecord>, EngineError> {
-        let cap = limit.clamp(1, 200) as i64;
-        self.pool.with_reader(|conn| {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT m.conv_id,
-                            COALESCE(u.name, m.user_id) AS owner_name,
-                            COALESCE(u.grp, '-') AS grp,
-                            COUNT(*) AS msg_count,
-                            COALESCE(SUM(LENGTH(m.payload)), 0) AS total_bytes,
-                            MAX(m.created_at_ms) AS updated_at_ms
-                     FROM msgs m
-                     LEFT JOIN users u ON u.id = m.user_id
-                     GROUP BY m.user_id, m.conv_id
-                     ORDER BY updated_at_ms DESC
-                     LIMIT ?1",
-                )
-                .map_err(|e| map_sqlite_err(e, "prepare list archives"))?;
-
-            let rows = stmt
-                .query_map([cap], |row| {
-                    let conv_id: String = row.get(0)?;
-                    let owner_name: String = row.get(1)?;
-                    let group: String = row.get(2)?;
-                    let messages: i64 = row.get(3)?;
-                    let total_bytes: i64 = row.get(4)?;
-                    let updated_at_ms: i64 = row.get(5)?;
-                    let bytes_kb = ((total_bytes.max(0) as u64) + 1023) / 1024;
-                    Ok(ArchiveRecord {
-                        conv_id,
-                        owner_name,
-                        group,
-                        messages: messages.max(0) as u64,
-                        prefix_version: 1,
-                        bytes_kb: bytes_kb.max(1),
-                        updated_at_ms,
-                    })
-                })
-                .map_err(|e| map_sqlite_err(e, "query list archives"))?;
-
-            let mut out = Vec::new();
-            for row in rows {
-                out.push(row.map_err(|e| map_sqlite_err(e, "read archive row"))?);
-            }
-            Ok(out)
-        })
     }
 }
 
@@ -84,7 +27,7 @@ impl ConvStore for SqliteConvStore {
     ) -> Result<u64, EngineError> {
         self.pool.with_writer(|conn| {
             let tx = conn
-                .transaction()
+                .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|e| map_sqlite_err(e, "begin append msg"))?;
             let next_seq: i64 = tx
                 .query_row(
@@ -133,6 +76,53 @@ impl ConvStore for SqliteConvStore {
             let mut out = Vec::new();
             for row in rows {
                 out.push(row.map_err(|e| map_sqlite_err(e, "read msg row"))?);
+            }
+            Ok(out)
+        })
+    }
+
+    fn list_archives(&self, limit: usize) -> Result<Vec<ArchiveRecord>, EngineError> {
+        let cap = limit.clamp(1, 200) as i64;
+        self.pool.with_reader(|conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT m.conv_id,
+                            COALESCE(u.name, m.user_id) AS owner_name,
+                            COALESCE(u.grp, '-') AS grp,
+                            COUNT(*) AS msg_count,
+                            COALESCE(SUM(LENGTH(m.payload)), 0) AS total_bytes,
+                            MAX(m.created_at_ms) AS updated_at_ms
+                     FROM msgs m
+                     LEFT JOIN users u ON u.id = m.user_id
+                     GROUP BY m.user_id, m.conv_id
+                     ORDER BY updated_at_ms DESC
+                     LIMIT ?1",
+                )
+                .map_err(|e| map_sqlite_err(e, "prepare list archives"))?;
+
+            let rows = stmt
+                .query_map([cap], |row| {
+                    let conv_id: String = row.get(0)?;
+                    let owner_name: String = row.get(1)?;
+                    let group: String = row.get(2)?;
+                    let messages: i64 = row.get(3)?;
+                    let total_bytes: i64 = row.get(4)?;
+                    let updated_at_ms: i64 = row.get(5)?;
+                    Ok(ArchiveRecord {
+                        conv_id,
+                        owner_name,
+                        group,
+                        messages: messages.max(0) as u64,
+                        prefix_version: 1,
+                        bytes: total_bytes.max(0) as u64,
+                        updated_at_ms,
+                    })
+                })
+                .map_err(|e| map_sqlite_err(e, "query list archives"))?;
+
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row.map_err(|e| map_sqlite_err(e, "read archive row"))?);
             }
             Ok(out)
         })

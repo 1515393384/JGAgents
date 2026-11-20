@@ -1,5 +1,5 @@
-#ifndef IMU_H       // Èç¹û»¹Ã»ÓÐ°üº¬¹ýÕâ¸öÍ·ÎÄ¼þ
-#define IMU_H       // ×öÒ»¸ö¡°ÒÑ¾­°üº¬¡±µÄ±ê¼Ç
+#ifndef IMU_H       // ï¿½ï¿½ï¿½ï¿½ï¿½Ã»ï¿½Ð°ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Í·ï¿½Ä¼ï¿½
+#define IMU_H       // ï¿½ï¿½Ò»ï¿½ï¿½ï¿½ï¿½ï¿½Ñ¾ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ä±ï¿½ï¿½
 #include "zf_common_headfile.h"
 extern int16 imu660ra_acc_x,imu660ra_acc_y,imu660ra_acc_z ;
 extern int16 imu660ra_gyro_x,imu660ra_gyro_y,imu660ra_gyro_z;
@@ -8,4 +8,4 @@ void imu_init(void);
 void imu_task(void);
 
 
-#endif              // ½áÊøÕâ´ÎÅÐ¶Ï
+#endif              // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ð¶ï¿½

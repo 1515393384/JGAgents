@@ -4,17 +4,17 @@
 #include "zf_device_tft180.h"
 #include "flash.h"
 #include "imu.h"
-// È«¾Ö±äÁ¿¶¨Òå
+// È«ï¿½Ö±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 uint8_t menu_level = 0;
 uint8_t current_line = 0;
-#define up B14     // ÉÏ¼ü
-#define down B12   // ÏÂ¼ü
-#define left C5    // ×ó¼ü
-#define right E15  // ÓÒ¼ü
-#define mid A2     // ÖÐ¼ü
+#define up B14     // ï¿½Ï¼ï¿½
+#define down B12   // ï¿½Â¼ï¿½
+#define left C5    // ï¿½ï¿½ï¿½
+#define right E15  // ï¿½Ò¼ï¿½
+#define mid A2     // ï¿½Ð¼ï¿½
 uint8_t key_release = 1;
 
-// º¯ÊýÊµÏÖ
+// ï¿½ï¿½ï¿½ï¿½Êµï¿½ï¿½
 void menu_init (void) {
     flash_init();
     tft180_init();
@@ -26,31 +26,31 @@ void menu_init (void) {
     gpio_init (down, GPI, 1, GPI_PULL_UP);
     gpio_init (mid, GPI, 1, GPI_PULL_UP);
 
-    // ³õÊ¼»¯´úÂë
+    // ï¿½ï¿½Ê¼ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 }
 
 void menu_task (void) {
-    // ÈÎÎñ´úÂë
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
   imu_task();
 
-    // °´¼ü
-    if (menu_level == 0)                                                       // Ö÷²Ëµ¥
+    // ï¿½ï¿½ï¿½ï¿½
+    if (menu_level == 0)                                                       // ï¿½ï¿½ï¿½Ëµï¿½
     {
-        if (gpio_get_level (up) == 0 && current_line > 0 && key_release == 1)  // ÉÏ¶¯
+        if (gpio_get_level (up) == 0 && current_line > 0 && key_release == 1)  // ï¿½Ï¶ï¿½
         {
             current_line--;
             while (gpio_get_level (up) == 0) {
                 system_delay_ms (20);
             }
         }
-        if (gpio_get_level (down) == 0 && current_line < 2)  // ÏÂ¶¯
+        if (gpio_get_level (down) == 0 && current_line < 2)  // ï¿½Â¶ï¿½
         {
             current_line++;
             while (gpio_get_level (down) == 0) {
                 system_delay_ms (20);
             }
         }
-        if (gpio_get_level (mid) == 0 && current_line == 0)  // È·¶¨½øÈëparameter
+        if (gpio_get_level (mid) == 0 && current_line == 0)  // È·ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½parameter
         {
             menu_level = 1;
             current_line = 0;
@@ -58,14 +58,14 @@ void menu_task (void) {
                 system_delay_ms (20);
             }
         }
-        if (gpio_get_level (mid) == 0 && current_line == 1)  // È·¶¨½øÈëfunctiong
+        if (gpio_get_level (mid) == 0 && current_line == 1)  // È·ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½functiong
         {
             menu_level = 2;
             while (gpio_get_level (mid) == 0) {
                 system_delay_ms (20);
             }
         }
-        if (gpio_get_level (mid) == 0 && current_line == 2)  // ½øÈëgyroscopeµÚÒ»Ò³
+        if (gpio_get_level (mid) == 0 && current_line == 2)  // ï¿½ï¿½ï¿½ï¿½gyroscopeï¿½ï¿½Ò»Ò³
         {
             menu_level = 3;
             while (gpio_get_level (mid) == 0) {
@@ -73,32 +73,32 @@ void menu_task (void) {
             
             }
         }
-    } else if (menu_level == 1)                            // parameterÒ³Ãæ
+    } else if (menu_level == 1)                            // parameterÒ³ï¿½ï¿½
     {
-        if (gpio_get_level (up) == 0 && current_line > 0)  // ÉÏ¶¯
+        if (gpio_get_level (up) == 0 && current_line > 0)  // ï¿½Ï¶ï¿½
         {
             while (gpio_get_level (up) == 0) {
                 system_delay_ms (20);
             }
             current_line--;
         }
-        if (gpio_get_level (down) == 0 && current_line < 2)  // ÏÂ¶¯
+        if (gpio_get_level (down) == 0 && current_line < 2)  // ï¿½Â¶ï¿½
         {
             current_line++;
             while (gpio_get_level (down) == 0) {
                 system_delay_ms (20);
             }
         }
-        if (current_line == 0)               // µ÷ÕûÊý
+        if (current_line == 0)               // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
         {
-            if (gpio_get_level (left) == 0)  // ¼õ
+            if (gpio_get_level (left) == 0)  // ï¿½ï¿½
             {
                 my_int -= 10;
                 while (gpio_get_level (left) == 0) {
                     system_delay_ms (20);
                 }
             }
-            if (gpio_get_level (right) == 0)  // ¼Ó
+            if (gpio_get_level (right) == 0)  // ï¿½ï¿½
             {
                 my_int += 10;
                 while (gpio_get_level (right) == 0) {
@@ -106,16 +106,16 @@ void menu_task (void) {
                 }
             }
         }
-        if (current_line == 1)               // µ÷¸¡µãÊý
+        if (current_line == 1)               // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
         {
-            if (gpio_get_level (left) == 0)  // ¼õ
+            if (gpio_get_level (left) == 0)  // ï¿½ï¿½
             {
                 my_float -= 0.01;
                 while (gpio_get_level (left) == 0) {
                     system_delay_ms (20);
                 }
             }
-            if (gpio_get_level (right) == 0)  // ¼Ó
+            if (gpio_get_level (right) == 0)  // ï¿½ï¿½
             {
                 my_float += 0.01;
                 while (gpio_get_level (right) == 0) {
@@ -123,7 +123,7 @@ void menu_task (void) {
                 }
             }
         }
-        if (gpio_get_level (mid) == 0 && current_line == 2)  // ·µ»Ø
+        if (gpio_get_level (mid) == 0 && current_line == 2)  // ï¿½ï¿½ï¿½ï¿½
         {
             menu_level = 0;
             current_line = 0;
@@ -131,7 +131,7 @@ void menu_task (void) {
                 system_delay_ms (20);
             }
         }
-        if (gpio_get_level (mid) == 0 && current_line != 2)  // ±£´æÊý×Ö
+        if (gpio_get_level (mid) == 0 && current_line != 2)  // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
         {
             while (gpio_get_level (mid) == 0) {
                 system_delay_ms (20);
@@ -142,7 +142,7 @@ void menu_task (void) {
             tft180_clear();
         }
 
-    } else if (menu_level == 2)  // function½çÃæ
+    } else if (menu_level == 2)  // functionï¿½ï¿½ï¿½ï¿½
     {
         if (gpio_get_level (mid) == 0) {
             menu_level = 0;
@@ -150,7 +150,7 @@ void menu_task (void) {
                 system_delay_ms (20);
             }
         }
-    } else if (menu_level == 3)  // ÔÚgyroscopeµÚÒ»Ò³
+    } else if (menu_level == 3)  // ï¿½ï¿½gyroscopeï¿½ï¿½Ò»Ò³
     {
         if (gpio_get_level (mid) == 0) {
             menu_level = 4;
@@ -159,7 +159,7 @@ void menu_task (void) {
             }
         }
 
-    } else if (menu_level == 4)  // ÔÚgyroscopeµÚ¶þÒ³
+    } else if (menu_level == 4)  // ï¿½ï¿½gyroscopeï¿½Ú¶ï¿½Ò³
     {
         if (gpio_get_level (mid) == 0) {
             menu_level = 0;
@@ -169,14 +169,14 @@ void menu_task (void) {
             }
         }
     }
-    // »­ÆÁÄ»
+    // ï¿½ï¿½ï¿½ï¿½Ä»
     tft180_clear();
-    if (menu_level == 0)  // Ö÷²Ëµ¥Ò³Ãæ
-    {                     // ÎÄ×Ö
+    if (menu_level == 0)  // ï¿½ï¿½ï¿½Ëµï¿½Ò³ï¿½ï¿½
+    {                     // ï¿½ï¿½ï¿½ï¿½
         tft180_show_string (20, 40, "Parameters");
         tft180_show_string (20, 70, "Functions");
         tft180_show_string (20, 100, "Gyroscope");
-        // ¹â±ê
+        // ï¿½ï¿½ï¿½
         if (current_line == 0) {
             tft180_show_string (10, 40, ">");
         }
@@ -186,18 +186,18 @@ void menu_task (void) {
         if (current_line == 2) {
             tft180_show_string (10, 100, ">");
         }
-    } else if (menu_level == 1)  // parameter²Ëµ¥Ò³Ãæ
+    } else if (menu_level == 1)  // parameterï¿½Ëµï¿½Ò³ï¿½ï¿½
     {
   
         tft180_show_string (10, 40, "I :");
         tft180_show_int (20, 40, my_int, 4);  
 
-        // ÏÔÊ¾ float
+        // ï¿½ï¿½Ê¾ float
         tft180_show_string (10, 70, "F:");
         tft180_show_float (20, 70, my_float, 1, 2);  
        //save
         tft180_show_string (10, 100, "save");
-        // ¹â±ê
+        // ï¿½ï¿½ï¿½
         if (current_line == 0) {
             tft180_show_string (5, 40, ">");
         }
@@ -207,7 +207,7 @@ void menu_task (void) {
         if (current_line == 2) {
             tft180_show_string (5, 100, ">");
         }
-    } else if (menu_level == 2)  // function½çÃæ
+    } else if (menu_level == 2)  // functionï¿½ï¿½ï¿½ï¿½
     {
         tft180_full (RGB565_YELLOW);
         tft180_draw_point (10, 10, RGB565_BLACK);
@@ -230,7 +230,7 @@ void menu_task (void) {
     } else if (menu_level == 4) {
 
         tft180_show_string (0, 10, "roll:");
-        tft180_show_float (30, 10, roll, 3, 2);  // ÕûÊý3Î» + Ð¡Êý2Î»
+        tft180_show_float (30, 10, roll, 3, 2);  // ï¿½ï¿½ï¿½ï¿½3Î» + Ð¡ï¿½ï¿½2Î»
         tft180_show_string (0, 40, "pitch:");
         tft180_show_float (30, 40, pitch, 3, 2);
         tft180_show_string (0, 70, "yaw:");

@@ -1,15 +1,14 @@
 use serde::Serialize;
 
-use crate::db::migrate::{current_version, CURRENT_SCHEMA_VERSION};
-use crate::db::pool::SqlitePool;
+use crate::core::traits::StorageHealth;
 use crate::engine::server::conn::MAX_CONNS;
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HealthCheckItem {
-    pub name: String,
-    pub detail: String,
+    pub key: &'static str,
     pub ok: bool,
+    pub value: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -21,62 +20,50 @@ pub struct HealthSnapshot {
     pub schema_ver: i64,
     pub max_conns: usize,
     pub active_conns: usize,
+    pub active_admins: usize,
     pub checks: Vec<HealthCheckItem>,
 }
 
 pub fn build_health_snapshot(
-    pool: Option<&SqlitePool>,
+    storage: &StorageHealth,
     active_admin_count: usize,
     active_conns: usize,
 ) -> HealthSnapshot {
-    let mut checks = Vec::with_capacity(4);
-    checks.push(HealthCheckItem {
-        name: String::from("HTTP /healthz 探针"),
-        detail: String::from("GET /healthz -> ver=1 · 路由在线"),
-        ok: true,
-    });
-
-    let (db_mode, schema_ver, db_ok, schema_ok) = match pool {
-        Some(p) => {
-            let ph = p.health_snapshot();
-            let ver = current_version(p).unwrap_or(0);
-            let s_ok = ver >= CURRENT_SCHEMA_VERSION;
-            checks.push(HealthCheckItem {
-                name: String::from("SQLite 存储与写通道"),
-                detail: format!("mode={} · {} · busy_timeout 5000ms", ph.journal_mode, ph.path),
-                ok: ph.writable,
-            });
-            checks.push(HealthCheckItem {
-                name: String::from("Schema 版本迁移"),
-                detail: format!("schema_ver = v{ver}（基线 v{CURRENT_SCHEMA_VERSION}）"),
-                ok: s_ok,
-            });
-            (ph.journal_mode, ver, ph.writable, s_ok)
-        }
-        None => {
-            checks.push(HealthCheckItem {
-                name: String::from("存储模式"),
-                detail: String::from("memory store（未挂载持久化库）"),
-                ok: true,
-            });
-            (String::from("memory"), 0, true, true)
-        }
-    };
-
+    let schema_ok = storage.schema_ver >= storage.expected_schema_ver;
     let admin_ok = active_admin_count > 0;
-    checks.push(HealthCheckItem {
-        name: String::from("管理员引导与隔离检查"),
-        detail: format!("启用管理员 {active_admin_count} 人 · 用户分区已启用"),
-        ok: admin_ok,
-    });
+    let conn_ok = active_conns <= MAX_CONNS;
+
+    let checks = vec![
+        HealthCheckItem {
+            key: "storage_write",
+            ok: storage.writable,
+            value: storage.db_mode.clone(),
+        },
+        HealthCheckItem {
+            key: "schema_version",
+            ok: schema_ok,
+            value: format!("v{}/v{}", storage.schema_ver, storage.expected_schema_ver),
+        },
+        HealthCheckItem {
+            key: "active_admins",
+            ok: admin_ok,
+            value: active_admin_count.to_string(),
+        },
+        HealthCheckItem {
+            key: "conn_capacity",
+            ok: conn_ok,
+            value: format!("{active_conns}/{MAX_CONNS}"),
+        },
+    ];
 
     HealthSnapshot {
-        ok: db_ok && schema_ok && admin_ok,
+        ok: storage.writable && schema_ok && admin_ok && conn_ok,
         ver: 1,
-        db_mode,
-        schema_ver,
+        db_mode: storage.db_mode.clone(),
+        schema_ver: storage.schema_ver,
         max_conns: MAX_CONNS,
         active_conns,
+        active_admins: active_admin_count,
         checks,
     }
 }

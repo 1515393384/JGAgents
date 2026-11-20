@@ -78,6 +78,7 @@ pub struct UserRecord {
     pub state: UserState,
     pub quota: UserQuota,
     pub token_hash: TokenHash,
+    pub token_hint: String,
     pub created_at_ms: i64,
     pub last_active_ms: i64,
 }
@@ -101,12 +102,65 @@ pub struct UpdateUserInput {
     pub monthly_tokens: Option<u64>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum UserSort {
+    #[default]
+    CreatedDesc,
+    UsageDesc,
+    RequestsDesc,
+}
+
+impl UserSort {
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "" | "created" => Some(Self::CreatedDesc),
+            "usage" => Some(Self::UsageDesc),
+            "requests" => Some(Self::RequestsDesc),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UserQuery {
+    pub search: Option<String>,
+    pub state: Option<UserState>,
+    pub role: Option<UserRole>,
+    pub group: Option<String>,
+    pub sort: UserSort,
+    pub page: usize,
+    pub page_size: usize,
+}
+
+impl Default for UserQuery {
+    fn default() -> Self {
+        Self {
+            search: None,
+            state: None,
+            role: None,
+            group: None,
+            sort: UserSort::CreatedDesc,
+            page: 1,
+            page_size: 50,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UserPage {
+    pub items: Vec<UserRecord>,
+    pub total: usize,
+    pub page: usize,
+    pub page_size: usize,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UserMetrics {
     pub total_users: usize,
     pub active_users: usize,
     pub disabled_users: usize,
     pub admin_users: usize,
+    pub active_admin_users: usize,
     pub total_monthly_quota: u64,
     pub total_used_tokens: u64,
     pub total_used_requests: u64,

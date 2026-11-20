@@ -1,11 +1,11 @@
 #include "flash.h"
 #include "zf_common_headfile.h"
 
-// // È«¾Ö±äÁ¿¶¨Òå
+// // È«ï¿½Ö±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 int16 my_int = 100;
 float my_float = 0.98;
 
-// // º¯ÊýÊµÏÖ
+// // ï¿½ï¿½ï¿½ï¿½Êµï¿½ï¿½
 void flash_init (void) {
     flash_read_page_to_buffer (62, 1);
     my_int = flash_union_buffer[0].int16_type;
@@ -15,7 +15,7 @@ void flash_init (void) {
     }
     if (my_float < -100.0 || my_float > 100.0) {
         my_float = 0.98;
-        // ³õÊ¼»¯´úÂë
+        // ï¿½ï¿½Ê¼ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     }
 }
 
@@ -29,4 +29,4 @@ void flash_task (void) {
     __enable_irq();
 }
 
-// ÈÎÎñ´úÂë
+// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½

@@ -96,7 +96,7 @@ export function CreateUserDialog({
         {issuedToken ? (
           <div className="space-y-4 p-5">
             <p className="text-xs leading-5 text-fg-muted">
-              已为 <span className="font-medium text-fg">{issuedName}</span> 生成接入凭证。服务端仅保存哈希指纹，明文凭证仅在此处展示一次。
+              已为 <span className="font-medium text-fg">{issuedName}</span> 生成接入凭证。服务端仅保存单向加椒哈希，明文凭证仅在此处展示一次。
             </p>
             <div className="flex items-center gap-2 rounded-field border border-brand/35 bg-brand-soft p-2.5">
               <code className="min-w-0 flex-1 truncate font-mono text-xs text-fg">

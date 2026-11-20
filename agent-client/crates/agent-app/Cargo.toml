@@ -1,0 +1,13 @@
+[package]
+name = "agent-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+wry = { workspace = true }
+tao = { workspace = true }
+
+[[bin]]
+name = "jiage"
+path = "src/main.rs"

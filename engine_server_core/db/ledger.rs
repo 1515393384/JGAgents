@@ -1,20 +1,14 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use rusqlite::TransactionBehavior;
+
 use crate::core::error::EngineError;
 use crate::core::ids::{ConvId, UserId};
-use crate::core::traits::LedgerStore;
+use crate::core::traits::{DailyTrendRow, LedgerStore};
 use crate::db::pool::{map_sqlite_err, SqlitePool};
 
 const MS_PER_DAY: i64 = 86_400_000;
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DailyTrendRow {
-    pub day_ms: i64,
-    pub requests: u64,
-    pub hit_rate: u8,
-    pub tokens_k: u64,
-}
 
 pub struct SqliteLedgerStore {
     pool: Arc<SqlitePool>,
@@ -23,78 +17,6 @@ pub struct SqliteLedgerStore {
 impl SqliteLedgerStore {
     pub fn new(pool: Arc<SqlitePool>) -> Self {
         Self { pool }
-    }
-
-    pub fn daily_trend(&self, now_ms: i64, days: usize) -> Result<Vec<DailyTrendRow>, EngineError> {
-        let window_days = days.clamp(1, 30) as i64;
-        let today_bucket = now_ms.max(0) / MS_PER_DAY;
-        let start_bucket = (today_bucket - (window_days - 1)).max(0);
-        let since_ms = start_bucket * MS_PER_DAY;
-
-        self.pool.with_reader(|conn| {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT created_at_ms / 86400000 AS day_bucket,
-                            COUNT(*) AS req_count,
-                            COALESCE(SUM(prompt_tokens), 0) AS sum_prompt,
-                            COALESCE(SUM(cached_tokens), 0) AS sum_cached,
-                            COALESCE(SUM(completion_tokens), 0) AS sum_completion
-                     FROM ledger
-                     WHERE created_at_ms >= ?1
-                     GROUP BY day_bucket
-                     ORDER BY day_bucket ASC",
-                )
-                .map_err(|e| map_sqlite_err(e, "prepare daily trend"))?;
-
-            let mut buckets: BTreeMap<i64, DailyTrendRow> = BTreeMap::new();
-            let rows = stmt
-                .query_map([since_ms], |row| {
-                    let bucket: i64 = row.get(0)?;
-                    let req_count: i64 = row.get(1)?;
-                    let sum_prompt: i64 = row.get(2)?;
-                    let sum_cached: i64 = row.get(3)?;
-                    let sum_completion: i64 = row.get(4)?;
-
-                    let prompt_u = sum_prompt.max(0) as u64;
-                    let cached_u = sum_cached.max(0) as u64;
-                    let comp_u = sum_completion.max(0) as u64;
-                    let hit_rate = if prompt_u > 0 {
-                        ((cached_u.saturating_mul(100)) / prompt_u).min(100) as u8
-                    } else {
-                        0
-                    };
-                    let tokens_k = (prompt_u + comp_u) / 1000;
-
-                    Ok((
-                        bucket,
-                        DailyTrendRow {
-                            day_ms: bucket * MS_PER_DAY,
-                            requests: req_count.max(0) as u64,
-                            hit_rate,
-                            tokens_k,
-                        },
-                    ))
-                })
-                .map_err(|e| map_sqlite_err(e, "query daily trend"))?;
-
-            for row in rows {
-                let (bucket, entry) = row.map_err(|e| map_sqlite_err(e, "read trend row"))?;
-                buckets.insert(bucket, entry);
-            }
-
-            let mut series = Vec::with_capacity(window_days as usize);
-            for offset in 0..window_days {
-                let bucket = start_bucket + offset;
-                let entry = buckets.remove(&bucket).unwrap_or(DailyTrendRow {
-                    day_ms: bucket * MS_PER_DAY,
-                    requests: 0,
-                    hit_rate: 0,
-                    tokens_k: 0,
-                });
-                series.push(entry);
-            }
-            Ok(series)
-        })
     }
 }
 
@@ -110,7 +32,7 @@ impl LedgerStore for SqliteLedgerStore {
     ) -> Result<(), EngineError> {
         self.pool.with_writer(|conn| {
             let tx = conn
-                .transaction()
+                .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|e| map_sqlite_err(e, "begin record_usage"))?;
 
             tx.execute(
@@ -141,6 +63,70 @@ impl LedgerStore for SqliteLedgerStore {
             tx.commit()
                 .map_err(|e| map_sqlite_err(e, "commit record_usage"))?;
             Ok(())
+        })
+    }
+
+    fn daily_trend(&self, now_ms: i64, days: usize) -> Result<Vec<DailyTrendRow>, EngineError> {
+        let window_days = days.clamp(1, 30) as i64;
+        let today_bucket = now_ms.max(0) / MS_PER_DAY;
+        let start_bucket = (today_bucket - (window_days - 1)).max(0);
+        let since_ms = start_bucket * MS_PER_DAY;
+
+        self.pool.with_reader(|conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT created_at_ms / 86400000 AS day_bucket,
+                            COUNT(*) AS req_count,
+                            COALESCE(SUM(prompt_tokens), 0) AS sum_prompt,
+                            COALESCE(SUM(cached_tokens), 0) AS sum_cached,
+                            COALESCE(SUM(completion_tokens), 0) AS sum_completion
+                     FROM ledger
+                     WHERE created_at_ms >= ?1
+                     GROUP BY day_bucket
+                     ORDER BY day_bucket ASC",
+                )
+                .map_err(|e| map_sqlite_err(e, "prepare daily trend"))?;
+
+            let mut buckets: BTreeMap<i64, DailyTrendRow> = BTreeMap::new();
+            let rows = stmt
+                .query_map([since_ms], |row| {
+                    let bucket: i64 = row.get(0)?;
+                    let req_count: i64 = row.get(1)?;
+                    let sum_prompt: i64 = row.get(2)?;
+                    let sum_cached: i64 = row.get(3)?;
+                    let sum_completion: i64 = row.get(4)?;
+
+                    Ok((
+                        bucket,
+                        DailyTrendRow {
+                            day_ms: bucket * MS_PER_DAY,
+                            requests: req_count.max(0) as u64,
+                            prompt_tokens: sum_prompt.max(0) as u64,
+                            cached_tokens: sum_cached.max(0) as u64,
+                            completion_tokens: sum_completion.max(0) as u64,
+                        },
+                    ))
+                })
+                .map_err(|e| map_sqlite_err(e, "query daily trend"))?;
+
+            for row in rows {
+                let (bucket, entry) = row.map_err(|e| map_sqlite_err(e, "read trend row"))?;
+                buckets.insert(bucket, entry);
+            }
+
+            let mut series = Vec::with_capacity(window_days as usize);
+            for offset in 0..window_days {
+                let bucket = start_bucket + offset;
+                let entry = buckets.remove(&bucket).unwrap_or(DailyTrendRow {
+                    day_ms: bucket * MS_PER_DAY,
+                    requests: 0,
+                    prompt_tokens: 0,
+                    cached_tokens: 0,
+                    completion_tokens: 0,
+                });
+                series.push(entry);
+            }
+            Ok(series)
         })
     }
 }

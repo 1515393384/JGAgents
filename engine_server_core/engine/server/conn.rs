@@ -23,7 +23,7 @@ pub struct ConnSnapshot {
     pub user_name: String,
     pub conv_id: String,
     pub ip: String,
-    pub uptime: String,
+    pub connected_at_ms: i64,
     pub inflight: bool,
 }
 
@@ -73,7 +73,7 @@ impl ConnRegistry {
         Ok(guard.len())
     }
 
-    pub fn snapshot(&self, now_ms: i64) -> Result<Vec<ConnSnapshot>, EngineError> {
+    pub fn snapshot(&self) -> Result<Vec<ConnSnapshot>, EngineError> {
         let guard = self
             .items
             .read()
@@ -88,22 +88,9 @@ impl ConnRegistry {
                 user_name: c.user_name.clone(),
                 conv_id: c.conv_id.clone(),
                 ip: c.ip.clone(),
-                uptime: format_uptime((now_ms - c.connected_at_ms).max(0)),
+                connected_at_ms: c.connected_at_ms,
                 inflight: c.inflight,
             })
             .collect())
-    }
-}
-
-fn format_uptime(elapsed_ms: i64) -> String {
-    let total_secs = elapsed_ms / 1000;
-    let mins = total_secs / 60;
-    let secs = total_secs % 60;
-    if mins >= 60 {
-        let hours = mins / 60;
-        let rem_mins = mins % 60;
-        format!("{hours}h {rem_mins:02}m")
-    } else {
-        format!("{mins:02}m {secs:02}s")
     }
 }

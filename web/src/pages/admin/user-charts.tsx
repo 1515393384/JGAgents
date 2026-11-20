@@ -1,5 +1,11 @@
 import { useMemo, useState } from 'react'
-import { formatTokens, type AdminUser, type DailyTrendPoint } from '../../lib/admin-users'
+import {
+  calcHitRatePct,
+  formatMonthDayMs,
+  formatTokens,
+  type AdminUser,
+  type DailyTrendPoint,
+} from '../../lib/admin-users'
 
 type GroupStat = {
   group: string
@@ -49,30 +55,44 @@ export function UserCharts({
   const innerW = W - PAD_X * 2
   const innerH = H - PAD_Y * 2
 
-  const maxReq = Math.max(...trend.map((d) => d.requests), 10)
-  const reqPoints = trend.map((d, i) => {
-    const x = PAD_X + (i / Math.max(1, trend.length - 1)) * innerW
+  const enriched = useMemo(
+    () =>
+      trend.map((d) => ({
+        ...d,
+        day: formatMonthDayMs(d.dayMs),
+        hitRate: calcHitRatePct(d),
+      })),
+    [trend],
+  )
+
+  const maxReq = Math.max(...enriched.map((d) => d.requests), 10)
+  const reqPoints = enriched.map((d, i) => {
+    const x = PAD_X + (i / Math.max(1, enriched.length - 1)) * innerW
     const y = PAD_Y + innerH - (d.requests / maxReq) * innerH
     return { x, y, ...d }
   })
-  const hitPoints = trend.map((d, i) => {
-    const x = PAD_X + (i / Math.max(1, trend.length - 1)) * innerW
+  const hitPoints = enriched.map((d, i) => {
+    const x = PAD_X + (i / Math.max(1, enriched.length - 1)) * innerW
     const y = PAD_Y + innerH - (d.hitRate / 100) * innerH
     return { x, y }
   })
 
-  const reqLine = reqPoints.map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ')
+  const reqLine = reqPoints
+    .map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x.toFixed(1)},${p.y.toFixed(1)}`)
+    .join(' ')
   const reqArea =
     reqPoints.length > 0
       ? `${reqLine} L${reqPoints[reqPoints.length - 1]?.x.toFixed(1) ?? PAD_X},${PAD_Y + innerH} L${PAD_X},${PAD_Y + innerH} Z`
       : ''
-  const hitLine = hitPoints.map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ')
+  const hitLine = hitPoints
+    .map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x.toFixed(1)},${p.y.toFixed(1)}`)
+    .join(' ')
 
   const activePoint = hoverIdx !== null ? reqPoints[hoverIdx] : reqPoints[reqPoints.length - 1]
+  const totalPrompt = trend.reduce((acc, d) => acc + d.promptTokens, 0)
+  const totalCached = trend.reduce((acc, d) => acc + d.cachedTokens, 0)
   const avgHit =
-    trend.length > 0
-      ? Math.round(trend.reduce((acc, d) => acc + d.hitRate, 0) / trend.length)
-      : 0
+    totalPrompt > 0 ? Math.min(100, Math.round((totalCached / totalPrompt) * 1000) / 10) : 0
 
   return (
     <div className="grid grid-cols-1 gap-3 lg:grid-cols-12">
@@ -143,7 +163,7 @@ export function UserCharts({
               </span>
               <span className="inline-flex items-center gap-1.5">
                 <span className="h-2 w-2 rounded-pill bg-ok" />
-                命中率（均值 {avgHit}%）
+                加权命中率（{avgHit}%）
               </span>
             </div>
           </div>
@@ -156,7 +176,7 @@ export function UserCharts({
         </div>
 
         <div className="mt-2">
-          {trend.length === 0 ? (
+          {enriched.length === 0 ? (
             <div className="flex h-[156px] items-center justify-center text-xs text-fg-subtle">
               暂无 7 日用量入账记录
             </div>
@@ -190,7 +210,14 @@ export function UserCharts({
               })}
 
               <path d={reqArea} fill="url(#reqAreaGrad)" />
-              <path d={reqLine} fill="none" stroke="var(--brand)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+              <path
+                d={reqLine}
+                fill="none"
+                stroke="var(--brand)"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
               <path
                 d={hitLine}
                 fill="none"
@@ -205,7 +232,7 @@ export function UserCharts({
                 const hp = hitPoints[i]
                 const isHover = hoverIdx === i
                 return (
-                  <g key={`${p.day}-${i}`}>
+                  <g key={`${p.dayMs}-${i}`}>
                     {isHover ? (
                       <line
                         x1={p.x}
@@ -225,12 +252,7 @@ export function UserCharts({
                       strokeWidth="2"
                     />
                     {hp ? (
-                      <circle
-                        cx={hp.x}
-                        cy={hp.y}
-                        r={isHover ? 3.5 : 2}
-                        fill="var(--ok)"
-                      />
+                      <circle cx={hp.x} cy={hp.y} r={isHover ? 3.5 : 2} fill="var(--ok)" />
                     ) : null}
                     <text
                       x={p.x}
@@ -241,9 +263,9 @@ export function UserCharts({
                       {p.day}
                     </text>
                     <rect
-                      x={p.x - innerW / (trend.length * 2)}
+                      x={p.x - innerW / (enriched.length * 2)}
                       y={0}
-                      width={innerW / trend.length}
+                      width={innerW / enriched.length}
                       height={H}
                       fill="transparent"
                       onMouseEnter={() => setHoverIdx(i)}

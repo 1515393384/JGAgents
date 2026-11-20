@@ -3,6 +3,8 @@ import { Check, Copy, KeyRound, ShieldAlert, Trash2, X } from 'lucide-react'
 import { Avatar, Bar, Button } from '../../components/ui'
 import {
   formatCount,
+  formatDateMs,
+  formatRelativeMs,
   formatTokens,
   type AdminUser,
   type UpdateUserPayload,
@@ -120,7 +122,7 @@ export function UserDrawer({
           <div className="min-w-0 flex-1">
             <div className="truncate text-sm font-medium text-fg">{user.name}</div>
             <div className="font-mono text-[11px] text-fg-subtle tabular-nums">
-              {user.id} · 创建于 {user.createdAt}
+              {user.id} · 创建于 {formatDateMs(user.createdAtMs)}
             </div>
           </div>
           <button
@@ -150,11 +152,18 @@ export function UserDrawer({
                 </span>
               </div>
               <div className="mt-2">
-                <Bar value={user.usedTokens} cap={monthlyTokens || 1} tone={pct >= 85 ? 'warn' : 'brand'} />
+                <Bar
+                  value={user.usedTokens}
+                  cap={monthlyTokens || 1}
+                  tone={pct >= 85 ? 'warn' : 'brand'}
+                />
               </div>
               <div className="mt-2 flex items-center justify-between text-[11px] text-fg-subtle tabular-nums">
-                <span>今日请求 {formatCount(user.usedRequests)} / {dailyRequests === 0 ? '不限' : formatCount(dailyRequests)}</span>
-                <span>最近活跃：{user.lastActiveAt}</span>
+                <span>
+                  今日请求 {formatCount(user.usedRequests)} /{' '}
+                  {dailyRequests === 0 ? '不限' : formatCount(dailyRequests)}
+                </span>
+                <span>最近活跃：{formatRelativeMs(user.lastActiveMs)}</span>
               </div>
             </div>
 
@@ -267,10 +276,14 @@ export function UserDrawer({
                 <div>
                   <div className="text-xs font-medium text-fg">访问凭证</div>
                   <div className="mt-0.5 font-mono text-[11px] text-fg-subtle">
-                    指纹前缀 {user.tokenFingerprint}····
+                    标识前缀 {user.tokenHint ? `${user.tokenHint}····` : '已隐藏'}
                   </div>
                 </div>
-                <Button variant="outline" onClick={handleRotate} className="whitespace-nowrap shrink-0">
+                <Button
+                  variant="outline"
+                  onClick={handleRotate}
+                  className="whitespace-nowrap shrink-0"
+                >
                   <KeyRound size={13} />
                   重置凭证
                 </Button>
@@ -278,12 +291,18 @@ export function UserDrawer({
 
               {newToken ? (
                 <div className="mt-3 rounded-field border border-brand/35 bg-brand-soft p-2.5">
-                  <div className="text-[11px] text-fg-muted">新凭证仅展示这一次，请立即复制保存：</div>
+                  <div className="text-[11px] text-fg-muted">
+                    新凭证仅展示这一次，请立即复制保存：
+                  </div>
                   <div className="mt-1.5 flex items-center gap-2">
                     <code className="min-w-0 flex-1 truncate rounded bg-surface px-2 py-1 font-mono text-xs text-fg">
                       {newToken}
                     </code>
-                    <Button variant="primary" onClick={handleCopyToken} className="h-7 px-2.5 text-xs shrink-0">
+                    <Button
+                      variant="primary"
+                      onClick={handleCopyToken}
+                      className="h-7 px-2.5 text-xs shrink-0"
+                    >
                       {copied ? <Check size={12} /> : <Copy size={12} />}
                       {copied ? '已复制' : '复制'}
                     </Button>
@@ -295,9 +314,15 @@ export function UserDrawer({
             <div className="border-t border-surface-border pt-4">
               {confirmDelete ? (
                 <div className="flex items-center justify-between gap-2 rounded-field border border-danger/35 bg-danger/10 p-2.5">
-                  <span className="text-xs text-danger">确认删除「{user.name}」？历史会话归属将不可恢复。</span>
+                  <span className="text-xs text-danger">
+                    确认删除「{user.name}」？历史会话归属将不可恢复。
+                  </span>
                   <div className="flex shrink-0 items-center gap-1.5">
-                    <Button variant="ghost" onClick={() => setConfirmDelete(false)} className="h-7 px-2 text-xs">
+                    <Button
+                      variant="ghost"
+                      onClick={() => setConfirmDelete(false)}
+                      className="h-7 px-2 text-xs"
+                    >
                       取消
                     </Button>
                     <button

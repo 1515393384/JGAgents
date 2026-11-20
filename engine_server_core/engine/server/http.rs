@@ -1,69 +1,70 @@
-use std::collections::HashSet;
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::extract::{Path, Query, Request, State};
+use axum::http::{header, HeaderValue, Method, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::core::error::EngineError;
 use crate::core::ids::UserId;
-use crate::core::traits::{Clock, UserStore};
-use crate::db::ledger::SqliteLedgerStore;
-use crate::db::msgs::SqliteConvStore;
-use crate::db::pool::SqlitePool;
+use crate::core::traits::{Clock, ConvStore, HealthProbe, LedgerStore, UserStore};
+use crate::db::pool::run_blocking;
+use crate::engine::user::model::UserRecord;
 use crate::engine::server::conn::{ConnRegistry, MAX_CONNS};
 use crate::engine::server::health::{build_health_snapshot, HealthSnapshot};
 use crate::engine::user::admin::UserAdminService;
+use crate::engine::user::gate::TokenGate;
 use crate::engine::user::model::{
-    CreateUserInput, UpdateUserInput, UserRecord, UserRole, UserState,
+    CreateUserInput, UpdateUserInput, UserQuery, UserRole, UserSort, UserState,
 };
+use crate::engine::user::token::TokenPepper;
 
-pub struct AppState<S: UserStore, C: Clock> {
-    pub store: Arc<S>,
+pub struct AppState<U, V, L, H, C>
+where
+    U: UserStore,
+    V: ConvStore,
+    L: LedgerStore,
+    H: HealthProbe,
+    C: Clock,
+{
+    pub users: Arc<U>,
+    pub convs: Arc<V>,
+    pub ledger: Arc<L>,
+    pub health: Arc<H>,
     pub clock: Arc<C>,
-    pub pool: Option<Arc<SqlitePool>>,
-    pub convs: Option<Arc<SqliteConvStore>>,
-    pub ledger: Option<Arc<SqliteLedgerStore>>,
+    pub pepper: Arc<TokenPepper>,
     pub conns: Arc<ConnRegistry>,
 }
 
-impl<S: UserStore, C: Clock> AppState<S, C> {
-    pub fn in_memory(store: Arc<S>, clock: Arc<C>) -> Self {
-        Self {
-            store,
-            clock,
-            pool: None,
-            convs: None,
-            ledger: None,
-            conns: Arc::new(ConnRegistry::default()),
-        }
-    }
-}
-
-impl<S: UserStore, C: Clock> Clone for AppState<S, C> {
+impl<U, V, L, H, C> Clone for AppState<U, V, L, H, C>
+where
+    U: UserStore,
+    V: ConvStore,
+    L: LedgerStore,
+    H: HealthProbe,
+    C: Clock,
+{
     fn clone(&self) -> Self {
         Self {
-            store: Arc::clone(&self.store),
+            users: Arc::clone(&self.users),
+            convs: Arc::clone(&self.convs),
+            ledger: Arc::clone(&self.ledger),
+            health: Arc::clone(&self.health),
             clock: Arc::clone(&self.clock),
-            pool: self.pool.clone(),
-            convs: self.convs.clone(),
-            ledger: self.ledger.clone(),
+            pepper: Arc::clone(&self.pepper),
             conns: Arc::clone(&self.conns),
         }
     }
 }
 
 #[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
 struct HealthRes {
     ok: bool,
     ver: u32,
-    db_mode: String,
-    schema_ver: i64,
 }
 
 #[derive(Serialize)]
@@ -78,14 +79,18 @@ struct UserDto {
     monthly_tokens: u64,
     used_requests: u64,
     used_tokens: u64,
-    token_fingerprint: String,
-    created_at: String,
-    last_active_at: String,
+    token_hint: String,
+    created_at_ms: i64,
+    last_active_ms: i64,
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct UsersListRes {
     users: Vec<UserDto>,
+    total: usize,
+    page: usize,
+    page_size: usize,
 }
 
 #[derive(Serialize)]
@@ -105,12 +110,18 @@ struct OkRes {
 }
 
 #[derive(Serialize)]
+struct BatchStateRes {
+    updated: usize,
+}
+
+#[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct MetricsRes {
     total_users: usize,
     active_users: usize,
     disabled_users: usize,
     admin_users: usize,
+    active_admin_users: usize,
     total_monthly_quota: u64,
     total_used_tokens: u64,
     total_used_requests: u64,
@@ -119,10 +130,11 @@ struct MetricsRes {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct TrendDto {
-    day: String,
+    day_ms: i64,
     requests: u64,
-    hit_rate: u8,
-    tokens_k: u64,
+    prompt_tokens: u64,
+    cached_tokens: u64,
+    completion_tokens: u64,
 }
 
 #[derive(Serialize)]
@@ -133,7 +145,7 @@ struct ConnectionDto {
     user_name: String,
     conv_id: String,
     ip: String,
-    uptime: String,
+    connected_at_ms: i64,
     inflight: bool,
 }
 
@@ -145,8 +157,8 @@ struct ArchiveDto {
     group: String,
     messages: u64,
     prefix_version: u32,
-    bytes_kb: u64,
-    updated_at: String,
+    bytes: u64,
+    updated_at_ms: i64,
 }
 
 #[derive(Serialize)]
@@ -164,6 +176,18 @@ struct OverviewRes {
 struct ErrorRes {
     code: &'static str,
     message: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ListUsersQuery {
+    search: Option<String>,
+    state: Option<String>,
+    role: Option<String>,
+    group: Option<String>,
+    sort: Option<String>,
+    page: Option<usize>,
+    page_size: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -218,54 +242,7 @@ impl IntoResponse for ApiError {
     }
 }
 
-fn civil_from_ms(ms: i64) -> (i64, u64, u64) {
-    if ms <= 0 {
-        return (1970, 1, 1);
-    }
-    let days = ms / 86_400_000;
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = (z - era * 146_097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = y + if m <= 2 { 1 } else { 0 };
-    (year, m, d)
-}
-
-fn format_date(ms: i64) -> String {
-    let (year, m, d) = civil_from_ms(ms);
-    format!("{year:04}-{m:02}-{d:02}")
-}
-
-fn format_month_day(ms: i64) -> String {
-    let (_, m, d) = civil_from_ms(ms);
-    format!("{m:02}/{d:02}")
-}
-
-fn format_relative(ms: i64, now_ms: i64, empty_label: &str) -> String {
-    if ms <= 0 {
-        return String::from(empty_label);
-    }
-    let diff_ms = (now_ms - ms).max(0);
-    let mins = diff_ms / 60_000;
-    if mins < 1 {
-        return String::from("刚刚");
-    }
-    if mins < 60 {
-        return format!("{mins} 分钟前");
-    }
-    let hours = mins / 60;
-    if hours < 24 {
-        return format!("{hours} 小时前");
-    }
-    format_date(ms)
-}
-
-fn to_dto(u: UserRecord, now_ms: i64) -> UserDto {
+fn to_dto(u: UserRecord) -> UserDto {
     UserDto {
         id: u.id.as_str().to_string(),
         name: u.name,
@@ -276,97 +253,259 @@ fn to_dto(u: UserRecord, now_ms: i64) -> UserDto {
         monthly_tokens: u.quota.monthly_tokens,
         used_requests: u.quota.used_requests,
         used_tokens: u.quota.used_tokens,
-        token_fingerprint: u.token_hash.fingerprint().to_string(),
-        created_at: format_date(u.created_at_ms),
-        last_active_at: format_relative(u.last_active_ms, now_ms, "尚未活跃"),
+        token_hint: u.token_hint,
+        created_at_ms: u.created_at_ms,
+        last_active_ms: u.last_active_ms,
     }
 }
 
-pub fn build_router<S, C>(state: AppState<S, C>) -> Router
+fn build_cors_layer() -> CorsLayer {
+    let mut origins: Vec<HeaderValue> = vec![
+        HeaderValue::from_static("http://localhost:5173"),
+        HeaderValue::from_static("http://127.0.0.1:5173"),
+        HeaderValue::from_static("http://localhost:3000"),
+        HeaderValue::from_static("http://127.0.0.1:3000"),
+    ];
+
+    if let Ok(extra) = std::env::var("CORS_ORIGINS") {
+        for raw in extra.split(',') {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() || trimmed == "*" {
+                continue;
+            }
+            match HeaderValue::from_str(trimmed) {
+                Ok(val) => {
+                    if !origins.contains(&val) {
+                        origins.push(val);
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(origin = %trimmed, error = %err, "ignored invalid CORS_ORIGINS entry");
+                }
+            }
+        }
+    }
+
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::list(origins))
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PATCH,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
+        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE])
+}
+
+pub fn build_router<U, V, L, H, C>(state: AppState<U, V, L, H, C>) -> Router
 where
-    S: UserStore + 'static,
+    U: UserStore + 'static,
+    V: ConvStore + 'static,
+    L: LedgerStore + 'static,
+    H: HealthProbe + 'static,
     C: Clock + 'static,
 {
+    let admin_routes = Router::new()
+        .route(
+            "/users",
+            get(list_users::<U, V, L, H, C>).post(create_user::<U, V, L, H, C>),
+        )
+        .route("/users/batch-state", patch(batch_set_state::<U, V, L, H, C>))
+        .route(
+            "/users/{id}",
+            patch(update_user::<U, V, L, H, C>).delete(delete_user::<U, V, L, H, C>),
+        )
+        .route("/users/{id}/state", patch(set_user_state::<U, V, L, H, C>))
+        .route("/users/{id}/token", post(rotate_token::<U, V, L, H, C>))
+        .route("/metrics", get(user_metrics::<U, V, L, H, C>))
+        .route("/overview", get(admin_overview::<U, V, L, H, C>))
+        .route("/health", get(admin_health::<U, V, L, H, C>))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_admin_middleware::<U, V, L, H, C>,
+        ));
+
     Router::new()
-        .route("/healthz", get(healthz::<S, C>))
-        .route(
-            "/api/admin/users",
-            get(list_users::<S, C>).post(create_user::<S, C>),
-        )
-        .route(
-            "/api/admin/users/batch-state",
-            patch(batch_set_state::<S, C>),
-        )
-        .route(
-            "/api/admin/users/{id}",
-            patch(update_user::<S, C>).delete(delete_user::<S, C>),
-        )
-        .route("/api/admin/users/{id}/state", patch(set_user_state::<S, C>))
-        .route("/api/admin/users/{id}/token", post(rotate_token::<S, C>))
-        .route("/api/admin/metrics", get(user_metrics::<S, C>))
-        .route("/api/admin/overview", get(admin_overview::<S, C>))
-        .route("/api/admin/health", get(admin_health::<S, C>))
-        .layer(CorsLayer::permissive())
+        .route("/healthz", get(healthz::<U, V, L, H, C>))
+        .nest("/api/admin", admin_routes)
+        .layer(build_cors_layer())
         .with_state(state)
 }
 
-async fn healthz<S: UserStore, C: Clock>(
-    State(state): State<AppState<S, C>>,
-) -> Result<Json<HealthRes>, ApiError> {
-    let users = state.store.list_all()?;
-    let active_admins = users
-        .iter()
-        .filter(|u| u.role == UserRole::Admin && u.state == UserState::Active)
-        .count();
-    let active_conns = state.conns.len().unwrap_or(0);
-    let snap = build_health_snapshot(state.pool.as_deref(), active_admins, active_conns);
-    Ok(Json(HealthRes {
-        ok: snap.ok,
-        ver: snap.ver,
-        db_mode: snap.db_mode,
-        schema_ver: snap.schema_ver,
+async fn require_admin_middleware<U, V, L, H, C>(
+    State(state): State<AppState<U, V, L, H, C>>,
+    mut req: Request,
+    next: Next,
+) -> Response
+where
+    U: UserStore + 'static,
+    V: ConvStore + 'static,
+    L: LedgerStore + 'static,
+    H: HealthProbe + 'static,
+    C: Clock + 'static,
+{
+    let bearer = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|raw| {
+            let trimmed = raw.trim();
+            trimmed
+                .strip_prefix("Bearer ")
+                .or_else(|| trimmed.strip_prefix("bearer "))
+        })
+        .map(str::to_string);
+
+    let token = match bearer {
+        Some(t) if !t.trim().is_empty() => t,
+        _ => return ApiError(EngineError::unauthorized("missing bearer token")).into_response(),
+    };
+
+    let users = Arc::clone(&state.users);
+    let pepper = Arc::clone(&state.pepper);
+    match run_blocking(move || {
+        let gate = TokenGate::new(users.as_ref(), pepper.as_ref());
+        gate.require_admin(&token)
+    })
+    .await
+    {
+        Ok(admin_user) => {
+            req.extensions_mut().insert(admin_user);
+            next.run(req).await
+        }
+        Err(err) => ApiError(err).into_response(),
+    }
+}
+
+async fn healthz<U, V, L, H, C>(
+    State(state): State<AppState<U, V, L, H, C>>,
+) -> Result<Json<HealthRes>, ApiError>
+where
+    U: UserStore + 'static,
+    V: ConvStore + 'static,
+    L: LedgerStore + 'static,
+    H: HealthProbe + 'static,
+    C: Clock + 'static,
+{
+    let users = Arc::clone(&state.users);
+    let health = Arc::clone(&state.health);
+    let conns = Arc::clone(&state.conns);
+
+    let ok = run_blocking(move || {
+        let storage = health.probe_storage()?;
+        let metrics = users.metrics()?;
+        let active_conns = conns.len()?;
+        let snap = build_health_snapshot(&storage, metrics.active_admin_users, active_conns);
+        Ok(snap.ok)
+    })
+    .await?;
+
+    Ok(Json(HealthRes { ok, ver: 1 }))
+}
+
+async fn list_users<U, V, L, H, C>(
+    State(state): State<AppState<U, V, L, H, C>>,
+    Query(params): Query<ListUsersQuery>,
+) -> Result<Json<UsersListRes>, ApiError>
+where
+    U: UserStore + 'static,
+    V: ConvStore + 'static,
+    L: LedgerStore + 'static,
+    H: HealthProbe + 'static,
+    C: Clock + 'static,
+{
+    let state_filter = match params.state.as_deref().map(str::trim).filter(|s| !s.is_empty() && *s != "all") {
+        Some(raw) => Some(
+            UserState::parse(raw).ok_or_else(|| EngineError::invalid_input("invalid state filter"))?,
+        ),
+        None => None,
+    };
+    let role_filter = match params.role.as_deref().map(str::trim).filter(|s| !s.is_empty() && *s != "all") {
+        Some(raw) => Some(
+            UserRole::parse(raw).ok_or_else(|| EngineError::invalid_input("invalid role filter"))?,
+        ),
+        None => None,
+    };
+    let sort = match params.sort.as_deref() {
+        Some(raw) => UserSort::parse(raw).ok_or_else(|| EngineError::invalid_input("invalid sort"))?,
+        None => UserSort::CreatedDesc,
+    };
+
+    let query = UserQuery {
+        search: params.search,
+        state: state_filter,
+        role: role_filter,
+        group: params.group,
+        sort,
+        page: params.page.unwrap_or(1),
+        page_size: params.page_size.unwrap_or(50),
+    };
+
+    let users = Arc::clone(&state.users);
+    let clock = Arc::clone(&state.clock);
+    let pepper = Arc::clone(&state.pepper);
+    let page = run_blocking(move || {
+        let svc = UserAdminService::new(users.as_ref(), clock.as_ref(), pepper.as_ref());
+        svc.query_users(&query)
+    })
+    .await?;
+
+    Ok(Json(UsersListRes {
+        users: page.items.into_iter().map(to_dto).collect(),
+        total: page.total,
+        page: page.page,
+        page_size: page.page_size,
     }))
 }
 
-async fn list_users<S: UserStore, C: Clock>(
-    State(state): State<AppState<S, C>>,
-) -> Result<Json<UsersListRes>, ApiError> {
-    let now_ms = state.clock.now_ms();
-    let svc = UserAdminService::new(state.store.as_ref(), state.clock.as_ref());
-    let users = svc
-        .list_users()?
-        .into_iter()
-        .map(|u| to_dto(u, now_ms))
-        .collect();
-    Ok(Json(UsersListRes { users }))
-}
-
-async fn create_user<S: UserStore, C: Clock>(
-    State(state): State<AppState<S, C>>,
+async fn create_user<U, V, L, H, C>(
+    State(state): State<AppState<U, V, L, H, C>>,
     Json(req): Json<CreateUserReq>,
-) -> Result<Json<UserWithTokenRes>, ApiError> {
+) -> Result<Json<UserWithTokenRes>, ApiError>
+where
+    U: UserStore + 'static,
+    V: ConvStore + 'static,
+    L: LedgerStore + 'static,
+    H: HealthProbe + 'static,
+    C: Clock + 'static,
+{
     let role = UserRole::parse(&req.role)
         .ok_or_else(|| EngineError::invalid_input("invalid role"))?;
-    let svc = UserAdminService::new(state.store.as_ref(), state.clock.as_ref());
-    let (user, token) = svc.create_user(CreateUserInput {
-        name: req.name,
-        group: req.group,
-        role,
-        daily_requests: req.daily_requests,
-        monthly_tokens: req.monthly_tokens,
-    })?;
-    let now_ms = state.clock.now_ms();
+
+    let users = Arc::clone(&state.users);
+    let clock = Arc::clone(&state.clock);
+    let pepper = Arc::clone(&state.pepper);
+    let (user, token) = run_blocking(move || {
+        let svc = UserAdminService::new(users.as_ref(), clock.as_ref(), pepper.as_ref());
+        svc.create_user(CreateUserInput {
+            name: req.name,
+            group: req.group,
+            role,
+            daily_requests: req.daily_requests,
+            monthly_tokens: req.monthly_tokens,
+        })
+    })
+    .await?;
+
     Ok(Json(UserWithTokenRes {
-        user: to_dto(user, now_ms),
+        user: to_dto(user),
         token,
     }))
 }
 
-async fn update_user<S: UserStore, C: Clock>(
-    State(state): State<AppState<S, C>>,
+async fn update_user<U, V, L, H, C>(
+    State(state): State<AppState<U, V, L, H, C>>,
     Path(id): Path<String>,
     Json(req): Json<UpdateUserReq>,
-) -> Result<Json<UserRes>, ApiError> {
+) -> Result<Json<UserRes>, ApiError>
+where
+    U: UserStore + 'static,
+    V: ConvStore + 'static,
+    L: LedgerStore + 'static,
+    H: HealthProbe + 'static,
+    C: Clock + 'static,
+{
     let role = match req.role {
         Some(raw) => Some(
             UserRole::parse(&raw).ok_or_else(|| EngineError::invalid_input("invalid role"))?,
@@ -379,177 +518,238 @@ async fn update_user<S: UserStore, C: Clock>(
         ),
         None => None,
     };
-    let svc = UserAdminService::new(state.store.as_ref(), state.clock.as_ref());
-    let user = svc.update_user(
-        &UserId::new(id),
-        UpdateUserInput {
-            name: req.name,
-            group: req.group,
-            role,
-            state: next_state,
-            daily_requests: req.daily_requests,
-            monthly_tokens: req.monthly_tokens,
-        },
-    )?;
-    let now_ms = state.clock.now_ms();
-    Ok(Json(UserRes {
-        user: to_dto(user, now_ms),
-    }))
+
+    let users = Arc::clone(&state.users);
+    let clock = Arc::clone(&state.clock);
+    let pepper = Arc::clone(&state.pepper);
+    let user = run_blocking(move || {
+        let svc = UserAdminService::new(users.as_ref(), clock.as_ref(), pepper.as_ref());
+        svc.update_user(
+            &UserId::new(id),
+            UpdateUserInput {
+                name: req.name,
+                group: req.group,
+                role,
+                state: next_state,
+                daily_requests: req.daily_requests,
+                monthly_tokens: req.monthly_tokens,
+            },
+        )
+    })
+    .await?;
+
+    Ok(Json(UserRes { user: to_dto(user) }))
 }
 
-async fn set_user_state<S: UserStore, C: Clock>(
-    State(state): State<AppState<S, C>>,
+async fn set_user_state<U, V, L, H, C>(
+    State(state): State<AppState<U, V, L, H, C>>,
     Path(id): Path<String>,
     Json(req): Json<SetStateReq>,
-) -> Result<Json<UserRes>, ApiError> {
+) -> Result<Json<UserRes>, ApiError>
+where
+    U: UserStore + 'static,
+    V: ConvStore + 'static,
+    L: LedgerStore + 'static,
+    H: HealthProbe + 'static,
+    C: Clock + 'static,
+{
     let next_state = UserState::parse(&req.state)
         .ok_or_else(|| EngineError::invalid_input("invalid state"))?;
-    let svc = UserAdminService::new(state.store.as_ref(), state.clock.as_ref());
-    let user = svc.set_state(&UserId::new(id), next_state)?;
-    let now_ms = state.clock.now_ms();
-    Ok(Json(UserRes {
-        user: to_dto(user, now_ms),
-    }))
+
+    let users = Arc::clone(&state.users);
+    let clock = Arc::clone(&state.clock);
+    let pepper = Arc::clone(&state.pepper);
+    let user = run_blocking(move || {
+        let svc = UserAdminService::new(users.as_ref(), clock.as_ref(), pepper.as_ref());
+        svc.set_state(&UserId::new(id), next_state)
+    })
+    .await?;
+
+    Ok(Json(UserRes { user: to_dto(user) }))
 }
 
-async fn batch_set_state<S: UserStore, C: Clock>(
-    State(state): State<AppState<S, C>>,
+async fn batch_set_state<U, V, L, H, C>(
+    State(state): State<AppState<U, V, L, H, C>>,
     Json(req): Json<BatchStateReq>,
-) -> Result<Json<UsersListRes>, ApiError> {
+) -> Result<Json<BatchStateRes>, ApiError>
+where
+    U: UserStore + 'static,
+    V: ConvStore + 'static,
+    L: LedgerStore + 'static,
+    H: HealthProbe + 'static,
+    C: Clock + 'static,
+{
     let next_state = UserState::parse(&req.state)
         .ok_or_else(|| EngineError::invalid_input("invalid state"))?;
-    let id_set: HashSet<String> = req.ids.into_iter().collect();
-    let svc = UserAdminService::new(state.store.as_ref(), state.clock.as_ref());
-    let all = svc.list_users()?;
 
-    if next_state == UserState::Disabled {
-        let remaining_admins = all
-            .iter()
-            .filter(|u| {
-                u.role == UserRole::Admin
-                    && u.state == UserState::Active
-                    && !id_set.contains(u.id.as_str())
-            })
-            .count();
-        if remaining_admins == 0 {
-            return Err(
-                EngineError::conflict("cannot disable all active admins").into(),
-            );
-        }
-    }
+    let users = Arc::clone(&state.users);
+    let clock = Arc::clone(&state.clock);
+    let pepper = Arc::clone(&state.pepper);
+    let updated = run_blocking(move || {
+        let svc = UserAdminService::new(users.as_ref(), clock.as_ref(), pepper.as_ref());
+        svc.batch_set_state(&req.ids, next_state)
+    })
+    .await?;
 
-    for id in &id_set {
-        if all.iter().any(|u| u.id.as_str() == id) {
-            svc.set_state(&UserId::new(id.clone()), next_state)?;
-        }
-    }
-
-    let now_ms = state.clock.now_ms();
-    let users = svc
-        .list_users()?
-        .into_iter()
-        .map(|u| to_dto(u, now_ms))
-        .collect();
-    Ok(Json(UsersListRes { users }))
+    Ok(Json(BatchStateRes { updated }))
 }
 
-async fn rotate_token<S: UserStore, C: Clock>(
-    State(state): State<AppState<S, C>>,
+async fn rotate_token<U, V, L, H, C>(
+    State(state): State<AppState<U, V, L, H, C>>,
     Path(id): Path<String>,
-) -> Result<Json<UserWithTokenRes>, ApiError> {
-    let svc = UserAdminService::new(state.store.as_ref(), state.clock.as_ref());
-    let (user, token) = svc.rotate_token(&UserId::new(id))?;
-    let now_ms = state.clock.now_ms();
+) -> Result<Json<UserWithTokenRes>, ApiError>
+where
+    U: UserStore + 'static,
+    V: ConvStore + 'static,
+    L: LedgerStore + 'static,
+    H: HealthProbe + 'static,
+    C: Clock + 'static,
+{
+    let users = Arc::clone(&state.users);
+    let clock = Arc::clone(&state.clock);
+    let pepper = Arc::clone(&state.pepper);
+    let (user, token) = run_blocking(move || {
+        let svc = UserAdminService::new(users.as_ref(), clock.as_ref(), pepper.as_ref());
+        svc.rotate_token(&UserId::new(id))
+    })
+    .await?;
+
     Ok(Json(UserWithTokenRes {
-        user: to_dto(user, now_ms),
+        user: to_dto(user),
         token,
     }))
 }
 
-async fn delete_user<S: UserStore, C: Clock>(
-    State(state): State<AppState<S, C>>,
+async fn delete_user<U, V, L, H, C>(
+    State(state): State<AppState<U, V, L, H, C>>,
     Path(id): Path<String>,
-) -> Result<Json<OkRes>, ApiError> {
-    let svc = UserAdminService::new(state.store.as_ref(), state.clock.as_ref());
-    svc.delete_user(&UserId::new(id))?;
+) -> Result<Json<OkRes>, ApiError>
+where
+    U: UserStore + 'static,
+    V: ConvStore + 'static,
+    L: LedgerStore + 'static,
+    H: HealthProbe + 'static,
+    C: Clock + 'static,
+{
+    let users = Arc::clone(&state.users);
+    let clock = Arc::clone(&state.clock);
+    let pepper = Arc::clone(&state.pepper);
+    run_blocking(move || {
+        let svc = UserAdminService::new(users.as_ref(), clock.as_ref(), pepper.as_ref());
+        svc.delete_user(&UserId::new(id))
+    })
+    .await?;
+
     Ok(Json(OkRes { ok: true }))
 }
 
-async fn user_metrics<S: UserStore, C: Clock>(
-    State(state): State<AppState<S, C>>,
-) -> Result<Json<MetricsRes>, ApiError> {
-    let svc = UserAdminService::new(state.store.as_ref(), state.clock.as_ref());
-    let m = svc.metrics()?;
+async fn user_metrics<U, V, L, H, C>(
+    State(state): State<AppState<U, V, L, H, C>>,
+) -> Result<Json<MetricsRes>, ApiError>
+where
+    U: UserStore + 'static,
+    V: ConvStore + 'static,
+    L: LedgerStore + 'static,
+    H: HealthProbe + 'static,
+    C: Clock + 'static,
+{
+    let users = Arc::clone(&state.users);
+    let clock = Arc::clone(&state.clock);
+    let pepper = Arc::clone(&state.pepper);
+    let m = run_blocking(move || {
+        let svc = UserAdminService::new(users.as_ref(), clock.as_ref(), pepper.as_ref());
+        svc.metrics()
+    })
+    .await?;
+
     Ok(Json(MetricsRes {
         total_users: m.total_users,
         active_users: m.active_users,
         disabled_users: m.disabled_users,
         admin_users: m.admin_users,
+        active_admin_users: m.active_admin_users,
         total_monthly_quota: m.total_monthly_quota,
         total_used_tokens: m.total_used_tokens,
         total_used_requests: m.total_used_requests,
     }))
 }
 
-async fn admin_health<S: UserStore, C: Clock>(
-    State(state): State<AppState<S, C>>,
-) -> Result<Json<HealthSnapshot>, ApiError> {
-    let users = state.store.list_all()?;
-    let active_admins = users
-        .iter()
-        .filter(|u| u.role == UserRole::Admin && u.state == UserState::Active)
-        .count();
-    let active_conns = state.conns.len()?;
-    Ok(Json(build_health_snapshot(
-        state.pool.as_deref(),
-        active_admins,
-        active_conns,
-    )))
+async fn admin_health<U, V, L, H, C>(
+    State(state): State<AppState<U, V, L, H, C>>,
+) -> Result<Json<HealthSnapshot>, ApiError>
+where
+    U: UserStore + 'static,
+    V: ConvStore + 'static,
+    L: LedgerStore + 'static,
+    H: HealthProbe + 'static,
+    C: Clock + 'static,
+{
+    let users = Arc::clone(&state.users);
+    let health = Arc::clone(&state.health);
+    let conns = Arc::clone(&state.conns);
+
+    let snap = run_blocking(move || {
+        let storage = health.probe_storage()?;
+        let metrics = users.metrics()?;
+        let active_conns = conns.len()?;
+        Ok(build_health_snapshot(
+            &storage,
+            metrics.active_admin_users,
+            active_conns,
+        ))
+    })
+    .await?;
+
+    Ok(Json(snap))
 }
 
-async fn admin_overview<S: UserStore, C: Clock>(
-    State(state): State<AppState<S, C>>,
-) -> Result<Json<OverviewRes>, ApiError> {
-    let now_ms = state.clock.now_ms();
-    let svc = UserAdminService::new(state.store.as_ref(), state.clock.as_ref());
-    let m = svc.metrics()?;
-    let users = svc.list_users()?;
-    let active_admins = users
-        .iter()
-        .filter(|u| u.role == UserRole::Admin && u.state == UserState::Active)
-        .count();
+async fn admin_overview<U, V, L, H, C>(
+    State(state): State<AppState<U, V, L, H, C>>,
+) -> Result<Json<OverviewRes>, ApiError>
+where
+    U: UserStore + 'static,
+    V: ConvStore + 'static,
+    L: LedgerStore + 'static,
+    H: HealthProbe + 'static,
+    C: Clock + 'static,
+{
+    let users = Arc::clone(&state.users);
+    let convs = Arc::clone(&state.convs);
+    let ledger = Arc::clone(&state.ledger);
+    let health = Arc::clone(&state.health);
+    let clock = Arc::clone(&state.clock);
+    let conns = Arc::clone(&state.conns);
 
-    let trend = match state.ledger.as_ref() {
-        Some(ledger) => ledger
+    let res = run_blocking(move || {
+        let now_ms = clock.now_ms();
+        let m = users.metrics()?;
+        let trend = ledger
             .daily_trend(now_ms, 7)?
             .into_iter()
             .map(|r| TrendDto {
-                day: format_month_day(r.day_ms),
+                day_ms: r.day_ms,
                 requests: r.requests,
-                hit_rate: r.hit_rate,
-                tokens_k: r.tokens_k,
+                prompt_tokens: r.prompt_tokens,
+                cached_tokens: r.cached_tokens,
+                completion_tokens: r.completion_tokens,
             })
-            .collect(),
-        None => Vec::new(),
-    };
+            .collect();
 
-    let connections = state
-        .conns
-        .snapshot(now_ms)?
-        .into_iter()
-        .map(|c| ConnectionDto {
-            id: c.id,
-            user_id: c.user_id,
-            user_name: c.user_name,
-            conv_id: c.conv_id,
-            ip: c.ip,
-            uptime: c.uptime,
-            inflight: c.inflight,
-        })
-        .collect::<Vec<_>>();
+        let connections = conns
+            .snapshot()?
+            .into_iter()
+            .map(|c| ConnectionDto {
+                id: c.id,
+                user_id: c.user_id,
+                user_name: c.user_name,
+                conv_id: c.conv_id,
+                ip: c.ip,
+                connected_at_ms: c.connected_at_ms,
+                inflight: c.inflight,
+            })
+            .collect::<Vec<_>>();
 
-    let archives = match state.convs.as_ref() {
-        Some(convs) => convs
+        let archives = convs
             .list_archives(50)?
             .into_iter()
             .map(|a| ArchiveDto {
@@ -558,33 +758,33 @@ async fn admin_overview<S: UserStore, C: Clock>(
                 group: a.group,
                 messages: a.messages,
                 prefix_version: a.prefix_version,
-                bytes_kb: a.bytes_kb,
-                updated_at: format_relative(a.updated_at_ms, now_ms, "暂无更新"),
+                bytes: a.bytes,
+                updated_at_ms: a.updated_at_ms,
             })
-            .collect(),
-        None => Vec::new(),
-    };
+            .collect();
 
-    let health = build_health_snapshot(
-        state.pool.as_deref(),
-        active_admins,
-        connections.len(),
-    );
+        let storage = health.probe_storage()?;
+        let health_snap = build_health_snapshot(&storage, m.active_admin_users, connections.len());
 
-    Ok(Json(OverviewRes {
-        metrics: MetricsRes {
-            total_users: m.total_users,
-            active_users: m.active_users,
-            disabled_users: m.disabled_users,
-            admin_users: m.admin_users,
-            total_monthly_quota: m.total_monthly_quota,
-            total_used_tokens: m.total_used_tokens,
-            total_used_requests: m.total_used_requests,
-        },
-        trend,
-        connections,
-        archives,
-        health,
-        max_conns: MAX_CONNS,
-    }))
+        Ok(OverviewRes {
+            metrics: MetricsRes {
+                total_users: m.total_users,
+                active_users: m.active_users,
+                disabled_users: m.disabled_users,
+                admin_users: m.admin_users,
+                active_admin_users: m.active_admin_users,
+                total_monthly_quota: m.total_monthly_quota,
+                total_used_tokens: m.total_used_tokens,
+                total_used_requests: m.total_used_requests,
+            },
+            trend,
+            connections,
+            archives,
+            health: health_snap,
+            max_conns: MAX_CONNS,
+        })
+    })
+    .await?;
+
+    Ok(Json(res))
 }

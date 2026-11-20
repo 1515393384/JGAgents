@@ -1,5 +1,3 @@
-use std::fmt;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ErrorCode {
     BadFrame,
@@ -14,7 +12,8 @@ pub enum ErrorCode {
     Internal,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("{}: {message}", self.as_str())]
 pub struct EngineError {
     pub code: ErrorCode,
     pub message: String,
@@ -26,6 +25,14 @@ impl EngineError {
             code,
             message: message.into(),
         }
+    }
+
+    pub fn bad_frame(message: impl Into<String>) -> Self {
+        Self::new(ErrorCode::BadFrame, message)
+    }
+
+    pub fn unsupported_version(message: impl Into<String>) -> Self {
+        Self::new(ErrorCode::UnsupportedVersion, message)
     }
 
     pub fn invalid_input(message: impl Into<String>) -> Self {
@@ -50,6 +57,10 @@ impl EngineError {
 
     pub fn budget(message: impl Into<String>) -> Self {
         Self::new(ErrorCode::Budget, message)
+    }
+
+    pub fn canceled(message: impl Into<String>) -> Self {
+        Self::new(ErrorCode::Canceled, message)
     }
 
     pub fn internal(message: impl Into<String>) -> Self {
@@ -85,11 +96,3 @@ impl EngineError {
         }
     }
 }
-
-impl fmt::Display for EngineError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}: {}", self.as_str(), self.message)
-    }
-}
-
-impl std::error::Error for EngineError {}

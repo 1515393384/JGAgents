@@ -1,12 +1,25 @@
 import { Activity, Archive, Database, RefreshCw } from 'lucide-react'
 import {
+  calcHitRatePct,
+  calcTotalTokens,
+  formatBytes,
   formatCount,
+  formatMonthDayMs,
+  formatRelativeMs,
   formatTokens,
+  formatUptimeMs,
   type AdminOverview,
   type AdminTab,
   type AdminUser,
 } from '../../lib/admin-users'
 import { Bar, Button } from '../../components/ui'
+
+const CHECK_LABELS: Record<string, string> = {
+  storage_write: 'SQLite 存储与写通道',
+  schema_version: 'Schema 版本迁移',
+  active_admins: '管理员引导与隔离检查',
+  conn_capacity: '活跃连接容量水线',
+}
 
 export function AdminSubView({
   tab,
@@ -75,7 +88,9 @@ export function AdminSubView({
                 <td className="px-4 py-3 text-fg">{c.userName}</td>
                 <td className="px-4 py-3 font-mono text-xs text-fg-muted">{c.convId}</td>
                 <td className="px-4 py-3 font-mono text-xs text-fg-muted tabular-nums">{c.ip}</td>
-                <td className="px-4 py-3 font-mono text-xs text-fg-muted tabular-nums">{c.uptime}</td>
+                <td className="px-4 py-3 font-mono text-xs text-fg-muted tabular-nums">
+                  {formatUptimeMs(c.connectedAtMs)}
+                </td>
                 <td className="px-4 py-3 text-right text-xs">
                   <span className={c.inflight ? 'text-brand' : 'text-fg-subtle'}>
                     {c.inflight ? '传输中' : '空闲'}
@@ -90,8 +105,9 @@ export function AdminSubView({
   }
 
   if (tab === 'metering') {
-    const totalUsed = users.reduce((s, u) => s + u.usedTokens, 0)
-    const totalQuota = users.reduce((s, u) => s + u.monthlyTokens, 0)
+    const totalUsed = overview?.metrics.totalUsedTokens ?? users.reduce((s, u) => s + u.usedTokens, 0)
+    const totalQuota =
+      overview?.metrics.totalMonthlyQuota ?? users.reduce((s, u) => s + u.monthlyTokens, 0)
     return (
       <div className="mt-5 grid grid-cols-1 gap-3 lg:grid-cols-2">
         <div className="rounded-card border border-surface-border bg-surface p-4">
@@ -101,11 +117,17 @@ export function AdminSubView({
           ) : (
             <div className="mt-3 divide-y divide-surface-border">
               {trend.map((d) => (
-                <div key={d.day} className="flex items-center justify-between py-2 text-xs">
-                  <span className="font-mono text-fg-muted tabular-nums">{d.day}</span>
+                <div key={d.dayMs} className="flex items-center justify-between py-2 text-xs">
+                  <span className="font-mono text-fg-muted tabular-nums">
+                    {formatMonthDayMs(d.dayMs)}
+                  </span>
                   <span className="font-mono text-fg tabular-nums">{formatCount(d.requests)} 次</span>
-                  <span className="font-mono text-ok tabular-nums">命中 {d.hitRate}%</span>
-                  <span className="font-mono text-fg-muted tabular-nums">{formatCount(d.tokensK)}K tok</span>
+                  <span className="font-mono text-ok tabular-nums">
+                    命中 {calcHitRatePct(d)}%
+                  </span>
+                  <span className="font-mono text-fg-muted tabular-nums">
+                    {formatTokens(calcTotalTokens(d))}
+                  </span>
                 </div>
               ))}
             </div>
@@ -180,10 +202,18 @@ export function AdminSubView({
                 <td className="px-4 py-3 font-mono text-xs text-fg-subtle">{a.convId}</td>
                 <td className="px-4 py-3 text-fg">{a.ownerName}</td>
                 <td className="px-4 py-3 text-fg-muted">{a.group}</td>
-                <td className="px-4 py-3 text-right font-mono text-xs text-fg tabular-nums">{a.messages}</td>
-                <td className="px-4 py-3 text-right font-mono text-xs text-fg-muted tabular-nums">v{a.prefixVersion}</td>
-                <td className="px-4 py-3 text-right font-mono text-xs text-fg-muted tabular-nums">{a.bytesKB} KB</td>
-                <td className="px-4 py-3 text-right text-xs text-fg-subtle tabular-nums">{a.updatedAt}</td>
+                <td className="px-4 py-3 text-right font-mono text-xs text-fg tabular-nums">
+                  {a.messages}
+                </td>
+                <td className="px-4 py-3 text-right font-mono text-xs text-fg-muted tabular-nums">
+                  v{a.prefixVersion}
+                </td>
+                <td className="px-4 py-3 text-right font-mono text-xs text-fg-muted tabular-nums">
+                  {formatBytes(a.bytes)}
+                </td>
+                <td className="px-4 py-3 text-right text-xs text-fg-subtle tabular-nums">
+                  {formatRelativeMs(a.updatedAtMs, '暂无更新')}
+                </td>
               </tr>
             ))}
           </tbody>
@@ -199,7 +229,8 @@ export function AdminSubView({
         <div className="flex items-center gap-2 text-fg-muted">
           <Database size={14} className="text-brand" />
           <span className="font-mono tabular-nums">
-            模式 {health?.dbMode ?? 'unknown'} · schema v{health?.schemaVer ?? 0} · 活跃连接 {health?.activeConns ?? 0}/{formatCount(health?.maxConns ?? 5000)}
+            模式 {health?.dbMode ?? 'unknown'} · schema v{health?.schemaVer ?? 0} · 活跃连接{' '}
+            {health?.activeConns ?? 0}/{formatCount(health?.maxConns ?? 5000)}
           </span>
         </div>
         <Button variant="outline" onClick={onRefresh} className="h-7 px-2.5 text-xs">
@@ -211,12 +242,14 @@ export function AdminSubView({
       <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
         {checks.map((item) => (
           <div
-            key={item.name}
+            key={item.key}
             className="flex items-center justify-between gap-3 rounded-card border border-surface-border bg-surface p-4"
           >
             <div className="min-w-0">
-              <div className="text-sm font-medium text-fg">{item.name}</div>
-              <div className="mt-1 truncate font-mono text-xs text-fg-subtle">{item.detail}</div>
+              <div className="text-sm font-medium text-fg">
+                {CHECK_LABELS[item.key] ?? item.key}
+              </div>
+              <div className="mt-1 truncate font-mono text-xs text-fg-subtle">{item.value}</div>
             </div>
             <span
               className={

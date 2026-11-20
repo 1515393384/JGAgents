@@ -4,7 +4,7 @@
 #include "math.h"
 #include "flash.h"
 
-// È«¾Ö±äÁ¿¶¨Òå
+// È«ï¿½Ö±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 float roll = 0, pitch = 0, yaw = 0;
 uint64_t last_time = 0;
 extern float my_float;
@@ -12,9 +12,9 @@ float gro_x_offest = 0;
 float gro_y_offest = 0;
 float gro_z_offest = 0;
 
-// º¯ÊýÊµÏÖ
+// ï¿½ï¿½ï¿½ï¿½Êµï¿½ï¿½
 void imu_init (void) {
-    // ³õÊ¼»¯´úÂë
+    // ï¿½ï¿½Ê¼ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     imu660ra_init();
     float sum_x = 0, sum_y = 0, sum_z = 0;
     for (int i = 0; i < 200; i++) {

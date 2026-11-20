@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = ["crates/agent-core", "crates/agent-app"]
+exclude = ["lab/slint-app", "third_party/wry", "third_party/tao"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "AGPL-3.0-only"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+# 自研 fork：见 third_party/{wry,tao}/OPENBITFUN-PATCH.md，只带必要补丁，不带 Tauri 全家桶。
+wry = { path = "third_party/wry" }
+tao = { path = "third_party/tao" }

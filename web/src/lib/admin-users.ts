@@ -4,6 +4,8 @@ export type UserState = 'active' | 'disabled'
 
 export type AdminTab = 'users' | 'connections' | 'metering' | 'archives' | 'health'
 
+export type UserSortKey = 'created' | 'usage' | 'requests'
+
 export type AdminUser = {
   id: string
   name: string
@@ -14,9 +16,26 @@ export type AdminUser = {
   monthlyTokens: number
   usedRequests: number
   usedTokens: number
-  tokenFingerprint: string
-  createdAt: string
-  lastActiveAt: string
+  tokenHint: string
+  createdAtMs: number
+  lastActiveMs: number
+}
+
+export type AdminUsersPage = {
+  users: AdminUser[]
+  total: number
+  page: number
+  pageSize: number
+  source: 'remote' | 'local'
+}
+
+export type UserQueryParams = {
+  search?: string
+  state?: 'all' | UserState
+  group?: string
+  sort?: UserSortKey
+  page?: number
+  pageSize?: number
 }
 
 export type CreateUserPayload = {
@@ -36,11 +55,23 @@ export type UpdateUserPayload = {
   monthlyTokens?: number
 }
 
+export type AdminMetrics = {
+  totalUsers: number
+  activeUsers: number
+  disabledUsers: number
+  adminUsers: number
+  activeAdminUsers: number
+  totalMonthlyQuota: number
+  totalUsedTokens: number
+  totalUsedRequests: number
+}
+
 export type DailyTrendPoint = {
-  day: string
+  dayMs: number
   requests: number
-  hitRate: number
-  tokensK: number
+  promptTokens: number
+  cachedTokens: number
+  completionTokens: number
 }
 
 export type ActiveConnection = {
@@ -49,7 +80,7 @@ export type ActiveConnection = {
   userName: string
   convId: string
   ip: string
-  uptime: string
+  connectedAtMs: number
   inflight: boolean
 }
 
@@ -59,14 +90,14 @@ export type ArchiveSummary = {
   group: string
   messages: number
   prefixVersion: number
-  bytesKB: number
-  updatedAt: string
+  bytes: number
+  updatedAtMs: number
 }
 
 export type HealthCheckItem = {
-  name: string
-  detail: string
+  key: string
   ok: boolean
+  value: string
 }
 
 export type HealthSnapshot = {
@@ -76,11 +107,13 @@ export type HealthSnapshot = {
   schemaVer: number
   maxConns: number
   activeConns: number
+  activeAdmins: number
   checks: HealthCheckItem[]
 }
 
 export type AdminOverview = {
   source: 'remote' | 'local'
+  metrics: AdminMetrics
   trend: DailyTrendPoint[]
   connections: ActiveConnection[]
   archives: ArchiveSummary[]
@@ -88,11 +121,51 @@ export type AdminOverview = {
   maxConns: number
 }
 
-const STORAGE_KEY = 'jiagou.admin.users.v1'
+export class AdminAuthError extends Error {
+  status: number
+  constructor(status: number, message: string) {
+    super(message)
+    this.name = 'AdminAuthError'
+    this.status = status
+  }
+}
+
+const STORAGE_KEY = 'jiagou.admin.users.v2'
+const TOKEN_STORAGE_KEY = 'jiagou.admin.token.v1'
+const DAY_MS = 86_400_000
+
+export function getAdminToken(): string {
+  try {
+    return sessionStorage.getItem(TOKEN_STORAGE_KEY)?.trim() ?? ''
+  } catch {
+    return ''
+  }
+}
+
+export function setAdminToken(token: string): void {
+  try {
+    const trimmed = token.trim()
+    if (trimmed) {
+      sessionStorage.setItem(TOKEN_STORAGE_KEY, trimmed)
+    } else {
+      sessionStorage.removeItem(TOKEN_STORAGE_KEY)
+    }
+  } catch {
+  }
+}
+
+export function clearAdminToken(): void {
+  try {
+    sessionStorage.removeItem(TOKEN_STORAGE_KEY)
+  } catch {
+  }
+}
+
+const NOW_REF = Date.now()
 
 const SEED_USERS: AdminUser[] = [
   {
-    id: 'u_01H8QK92',
+    id: 'u_demo_chenmo',
     name: '陈默',
     group: '研发',
     role: 'admin',
@@ -101,12 +174,12 @@ const SEED_USERS: AdminUser[] = [
     monthlyTokens: 4_000_000,
     usedRequests: 312,
     usedTokens: 3_120_000,
-    tokenFingerprint: 'a94f2c18',
-    createdAt: '2026-09-02',
-    lastActiveAt: '2 分钟前',
+    tokenHint: 'jg_a94f',
+    createdAtMs: NOW_REF - 60 * DAY_MS,
+    lastActiveMs: NOW_REF - 2 * 60_000,
   },
   {
-    id: 'u_01H8QN47',
+    id: 'u_demo_liyu',
     name: '李渝',
     group: '售前',
     role: 'admin',
@@ -115,12 +188,12 @@ const SEED_USERS: AdminUser[] = [
     monthlyTokens: 4_000_000,
     usedRequests: 196,
     usedTokens: 2_100_000,
-    tokenFingerprint: '71bd0e4a',
-    createdAt: '2026-09-11',
-    lastActiveAt: '9 分钟前',
+    tokenHint: 'jg_71bd',
+    createdAtMs: NOW_REF - 50 * DAY_MS,
+    lastActiveMs: NOW_REF - 9 * 60_000,
   },
   {
-    id: 'u_01H8QT13',
+    id: 'u_demo_wanglan',
     name: '王岚',
     group: '运营',
     role: 'member',
@@ -129,12 +202,12 @@ const SEED_USERS: AdminUser[] = [
     monthlyTokens: 1_500_000,
     usedRequests: 300,
     usedTokens: 1_500_000,
-    tokenFingerprint: '3c82a91f',
-    createdAt: '2026-10-04',
-    lastActiveAt: '3 天前',
+    tokenHint: 'jg_3c82',
+    createdAtMs: NOW_REF - 35 * DAY_MS,
+    lastActiveMs: NOW_REF - 3 * DAY_MS,
   },
   {
-    id: 'u_01H8R205',
+    id: 'u_demo_zhaoyu',
     name: '赵隅',
     group: '交付',
     role: 'member',
@@ -143,12 +216,12 @@ const SEED_USERS: AdminUser[] = [
     monthlyTokens: 3_000_000,
     usedRequests: 148,
     usedTokens: 1_840_000,
-    tokenFingerprint: 'e402c57b',
-    createdAt: '2026-10-22',
-    lastActiveAt: '26 分钟前',
+    tokenHint: 'jg_e402',
+    createdAtMs: NOW_REF - 24 * DAY_MS,
+    lastActiveMs: NOW_REF - 26 * 60_000,
   },
   {
-    id: 'u_01H8RA81',
+    id: 'u_demo_zhouyan',
     name: '周砚',
     group: '研发',
     role: 'member',
@@ -157,12 +230,12 @@ const SEED_USERS: AdminUser[] = [
     monthlyTokens: 3_500_000,
     usedRequests: 245,
     usedTokens: 2_690_000,
-    tokenFingerprint: '90fa6d12',
-    createdAt: '2026-10-29',
-    lastActiveAt: '1 小时前',
+    tokenHint: 'jg_90fa',
+    createdAtMs: NOW_REF - 18 * DAY_MS,
+    lastActiveMs: NOW_REF - 60 * 60_000,
   },
   {
-    id: 'u_01H8RF39',
+    id: 'u_demo_linzhixia',
     name: '林知夏',
     group: '售前',
     role: 'member',
@@ -171,62 +244,77 @@ const SEED_USERS: AdminUser[] = [
     monthlyTokens: 2_000_000,
     usedRequests: 92,
     usedTokens: 860_000,
-    tokenFingerprint: '55ce108e',
-    createdAt: '2026-11-03',
-    lastActiveAt: '4 小时前',
-  },
-  {
-    id: 'u_01H8RM64',
-    name: '许宁',
-    group: '产品',
-    role: 'member',
-    state: 'active',
-    dailyRequests: 500,
-    monthlyTokens: 2_000_000,
-    usedRequests: 64,
-    usedTokens: 540_000,
-    tokenFingerprint: '1b90f32c',
-    createdAt: '2026-11-10',
-    lastActiveAt: '昨天',
-  },
-  {
-    id: 'u_01H8RT08',
-    name: '沈远',
-    group: '交付',
-    role: 'member',
-    state: 'disabled',
-    dailyRequests: 300,
-    monthlyTokens: 1_000_000,
-    usedRequests: 0,
-    usedTokens: 120_000,
-    tokenFingerprint: 'c7d481a9',
-    createdAt: '2026-11-15',
-    lastActiveAt: '5 天前',
+    tokenHint: 'jg_55ce',
+    createdAtMs: NOW_REF - 14 * DAY_MS,
+    lastActiveMs: NOW_REF - 4 * 3_600_000,
   },
 ]
 
-export const weeklyTrend: DailyTrendPoint[] = [
-  { day: '11/14', requests: 890, hitRate: 71, tokensK: 1420 },
-  { day: '11/15', requests: 1020, hitRate: 74, tokensK: 1680 },
-  { day: '11/16', requests: 940, hitRate: 73, tokensK: 1510 },
-  { day: '11/17', requests: 1180, hitRate: 76, tokensK: 1940 },
-  { day: '11/18', requests: 1310, hitRate: 79, tokensK: 2180 },
-  { day: '11/19', requests: 1240, hitRate: 77, tokensK: 2040 },
-  { day: '11/20', requests: 1357, hitRate: 81, tokensK: 2290 },
-]
+function buildLocalTrend(nowMs: number): DailyTrendPoint[] {
+  const todayBucket = Math.floor(nowMs / DAY_MS)
+  const samples = [
+    { requests: 890, prompt: 960_000, cached: 681_600, comp: 460_000 },
+    { requests: 1020, prompt: 1_120_000, cached: 828_800, comp: 560_000 },
+    { requests: 940, prompt: 1_010_000, cached: 737_300, comp: 500_000 },
+    { requests: 1180, prompt: 1_290_000, cached: 980_400, comp: 650_000 },
+    { requests: 1310, prompt: 1_450_000, cached: 1_145_500, comp: 730_000 },
+    { requests: 1240, prompt: 1_360_000, cached: 1_047_200, comp: 680_000 },
+    { requests: 1357, prompt: 1_510_000, cached: 1_223_100, comp: 780_000 },
+  ]
+  return samples.map((s, idx) => ({
+    dayMs: (todayBucket - (samples.length - 1 - idx)) * DAY_MS,
+    requests: s.requests,
+    promptTokens: s.prompt,
+    cachedTokens: s.cached,
+    completionTokens: s.comp,
+  }))
+}
 
-export const activeConnections: ActiveConnection[] = [
-  { id: 'ws_9f2a', userId: 'u_01H8QK92', userName: '陈默', convId: 'conv_tender_03', ip: '10.24.8.14', uptime: '42m 18s', inflight: true },
-  { id: 'ws_9f3c', userId: 'u_01H8QN47', userName: '李渝', convId: 'conv_bid_alpha', ip: '10.24.8.31', uptime: '19m 04s', inflight: false },
-  { id: 'ws_9f51', userId: 'u_01H8R205', userName: '赵隅', convId: 'conv_delivery_b', ip: '10.24.9.07', uptime: '06m 52s', inflight: true },
-]
+function buildLocalConnections(nowMs: number): ActiveConnection[] {
+  return [
+    {
+      id: 'ws_9f2a',
+      userId: 'u_demo_chenmo',
+      userName: '陈默',
+      convId: 'conv_tender_03',
+      ip: '10.24.8.14',
+      connectedAtMs: nowMs - 42 * 60_000 - 18_000,
+      inflight: true,
+    },
+    {
+      id: 'ws_9f3c',
+      userId: 'u_demo_liyu',
+      userName: '李渝',
+      convId: 'conv_bid_alpha',
+      ip: '10.24.8.31',
+      connectedAtMs: nowMs - 19 * 60_000 - 4_000,
+      inflight: false,
+    },
+  ]
+}
 
-export const archiveSummaries: ArchiveSummary[] = [
-  { convId: 'conv_tender_03', ownerName: '陈默', group: '研发', messages: 84, prefixVersion: 3, bytesKB: 412, updatedAt: '2 分钟前' },
-  { convId: 'conv_bid_alpha', ownerName: '李渝', group: '售前', messages: 62, prefixVersion: 3, bytesKB: 318, updatedAt: '9 分钟前' },
-  { convId: 'conv_delivery_b', ownerName: '赵隅', group: '交付', messages: 49, prefixVersion: 3, bytesKB: 256, updatedAt: '26 分钟前' },
-  { convId: 'conv_weekly_47', ownerName: '周砚', group: '研发', messages: 31, prefixVersion: 3, bytesKB: 148, updatedAt: '1 小时前' },
-]
+function buildLocalArchives(nowMs: number): ArchiveSummary[] {
+  return [
+    {
+      convId: 'conv_tender_03',
+      ownerName: '陈默',
+      group: '研发',
+      messages: 84,
+      prefixVersion: 3,
+      bytes: 421_888,
+      updatedAtMs: nowMs - 2 * 60_000,
+    },
+    {
+      convId: 'conv_bid_alpha',
+      ownerName: '李渝',
+      group: '售前',
+      messages: 62,
+      prefixVersion: 3,
+      bytes: 325_632,
+      updatedAtMs: nowMs - 9 * 60_000,
+    },
+  ]
+}
 
 function readLocalUsers(): AdminUser[] {
   try {
@@ -251,16 +339,11 @@ function writeLocalUsers(users: AdminUser[]) {
 }
 
 function randomHex(len: number): string {
-  const chars = '0123456789abcdef'
-  let out = ''
-  for (let i = 0; i < len; i++) {
-    out += chars[Math.floor(Math.random() * chars.length)] ?? '0'
-  }
-  return out
-}
-
-function todayStr(): string {
-  return new Date().toISOString().slice(0, 10)
+  const bytes = new Uint8Array(Math.ceil(len / 2))
+  crypto.getRandomValues(bytes)
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0'))
+    .join('')
+    .slice(0, len)
 }
 
 function isLastActiveAdmin(users: AdminUser[], id: string): boolean {
@@ -269,51 +352,132 @@ function isLastActiveAdmin(users: AdminUser[], id: string): boolean {
 }
 
 async function tryApi<T>(path: string, init?: RequestInit): Promise<T | null> {
+  const token = getAdminToken()
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  }
+  if (token) {
+    headers.Authorization = `Bearer ${token}`
+  }
+
+  let res: Response
   try {
-    const res = await fetch(path, {
-      headers: { 'Content-Type': 'application/json' },
+    res = await fetch(path, {
       ...init,
+      headers: {
+        ...headers,
+        ...(init?.headers as Record<string, string> | undefined),
+      },
     })
-    if (!res.ok) {
-      const contentType = res.headers.get('content-type') ?? ''
-      if (contentType.includes('application/json')) {
-        const err = (await res.json()) as { message?: string }
-        if (err.message) throw new Error(err.message)
-      }
-      return null
-    }
-    const contentType = res.headers.get('content-type') ?? ''
-    if (!contentType.includes('application/json')) return null
-    return (await res.json()) as T
-  } catch (e) {
-    if (e instanceof Error && e.message && !e.message.includes('Failed to fetch')) {
-      throw e
-    }
+  } catch {
     return null
   }
+
+  const contentType = res.headers.get('content-type') ?? ''
+  if (res.status === 401 || res.status === 403) {
+    let msg = res.status === 401 ? '请提供有效的管理员凭证' : '当前凭证无管理员权限或账号已停用'
+    if (contentType.includes('application/json')) {
+      const err = (await res.json()) as { message?: string }
+      if (err.message) msg = err.message
+    }
+    throw new AdminAuthError(res.status, msg)
+  }
+
+  if (!res.ok) {
+    if (contentType.includes('application/json')) {
+      const err = (await res.json()) as { message?: string }
+      if (err.message) throw new Error(err.message)
+    }
+    if (res.status >= 500 || res.status === 404 || res.status === 502 || res.status === 503) {
+      if (!contentType.includes('application/json')) {
+        return null
+      }
+    }
+    throw new Error(`请求失败 (${res.status})`)
+  }
+
+  if (!contentType.includes('application/json')) return null
+  return (await res.json()) as T
 }
 
-export async function fetchAdminUsers(): Promise<AdminUser[]> {
-  const remote = await tryApi<{ users: AdminUser[] }>('/api/admin/users')
+export async function fetchAdminUsers(params: UserQueryParams = {}): Promise<AdminUsersPage> {
+  const qs = new URLSearchParams()
+  if (params.search?.trim()) qs.set('search', params.search.trim())
+  if (params.state && params.state !== 'all') qs.set('state', params.state)
+  if (params.group && params.group !== 'all') qs.set('group', params.group)
+  if (params.sort) qs.set('sort', params.sort)
+  if (params.page) qs.set('page', String(params.page))
+  if (params.pageSize) qs.set('pageSize', String(params.pageSize))
+
+  const suffix = qs.toString() ? `?${qs.toString()}` : ''
+  const remote = await tryApi<{
+    users: AdminUser[]
+    total: number
+    page: number
+    pageSize: number
+  }>(`/api/admin/users${suffix}`)
+
   if (remote?.users) {
-    writeLocalUsers(remote.users)
-    return remote.users
+    return {
+      users: remote.users,
+      total: remote.total,
+      page: remote.page,
+      pageSize: remote.pageSize,
+      source: 'remote',
+    }
   }
-  return readLocalUsers()
+
+  const all = readLocalUsers()
+  const q = params.search?.trim().toLowerCase() ?? ''
+  let list = all.filter((u) => {
+    if (params.state && params.state !== 'all' && u.state !== params.state) return false
+    if (params.group && params.group !== 'all' && u.group !== params.group) return false
+    if (!q) return true
+    return (
+      u.name.toLowerCase().includes(q) ||
+      u.id.toLowerCase().includes(q) ||
+      u.group.toLowerCase().includes(q)
+    )
+  })
+
+  if (params.sort === 'usage') {
+    list = [...list].sort((a, b) => {
+      const ra = a.monthlyTokens > 0 ? a.usedTokens / a.monthlyTokens : 0
+      const rb = b.monthlyTokens > 0 ? b.usedTokens / b.monthlyTokens : 0
+      return rb - ra
+    })
+  } else if (params.sort === 'requests') {
+    list = [...list].sort((a, b) => b.usedRequests - a.usedRequests)
+  } else {
+    list = [...list].sort((a, b) => b.createdAtMs - a.createdAtMs)
+  }
+
+  const page = Math.max(1, params.page ?? 1)
+  const pageSize = Math.max(1, params.pageSize ?? 50)
+  const start = (page - 1) * pageSize
+  return {
+    users: list.slice(start, start + pageSize),
+    total: list.length,
+    page,
+    pageSize,
+    source: 'local',
+  }
 }
 
 export async function fetchAdminOverview(localUsers?: AdminUser[]): Promise<AdminOverview> {
   const remote = await tryApi<{
-    trend?: DailyTrendPoint[]
-    connections?: ActiveConnection[]
-    archives?: ArchiveSummary[]
-    health?: HealthSnapshot
-    maxConns?: number
+    metrics: AdminMetrics
+    trend: DailyTrendPoint[]
+    connections: ActiveConnection[]
+    archives: ArchiveSummary[]
+    health: HealthSnapshot
+    maxConns: number
   }>('/api/admin/overview')
 
   if (remote?.health) {
     return {
       source: 'remote',
+      metrics: remote.metrics,
       trend: remote.trend ?? [],
       connections: remote.connections ?? [],
       archives: remote.archives ?? [],
@@ -322,26 +486,41 @@ export async function fetchAdminOverview(localUsers?: AdminUser[]): Promise<Admi
     }
   }
 
+  const nowMs = Date.now()
   const users = localUsers ?? readLocalUsers()
   const activeAdmins = users.filter((u) => u.role === 'admin' && u.state === 'active').length
+  const activeCount = users.filter((u) => u.state === 'active').length
+  const connections = buildLocalConnections(nowMs)
+
   return {
     source: 'local',
-    trend: weeklyTrend,
-    connections: activeConnections,
-    archives: archiveSummaries,
+    metrics: {
+      totalUsers: users.length,
+      activeUsers: activeCount,
+      disabledUsers: users.length - activeCount,
+      adminUsers: users.filter((u) => u.role === 'admin').length,
+      activeAdminUsers: activeAdmins,
+      totalMonthlyQuota: users.reduce((s, u) => s + u.monthlyTokens, 0),
+      totalUsedTokens: users.reduce((s, u) => s + u.usedTokens, 0),
+      totalUsedRequests: users.reduce((s, u) => s + u.usedRequests, 0),
+    },
+    trend: buildLocalTrend(nowMs),
+    connections,
+    archives: buildLocalArchives(nowMs),
     maxConns: 5000,
     health: {
       ok: activeAdmins > 0,
       ver: 1,
-      dbMode: 'local-fallback',
-      schemaVer: 1,
+      dbMode: 'local-preview',
+      schemaVer: 2,
       maxConns: 5000,
-      activeConns: activeConnections.length,
+      activeConns: connections.length,
+      activeAdmins,
       checks: [
-        { name: 'HTTP /healthz 探针', detail: '当前未检测到后端服务 · 使用本地回退数据', ok: false },
-        { name: 'SQLite 存储与写通道', detail: '本地浏览器预览模式（未连接引擎）', ok: true },
-        { name: 'Schema 版本迁移', detail: 'schema_ver = v1（预期基线）', ok: true },
-        { name: '管理员引导与隔离检查', detail: `本地启用管理员 ${activeAdmins} 人`, ok: activeAdmins > 0 },
+        { key: 'storage_write', ok: false, value: 'local-preview' },
+        { key: 'schema_version', ok: true, value: 'v2/v2' },
+        { key: 'active_admins', ok: activeAdmins > 0, value: String(activeAdmins) },
+        { key: 'conn_capacity', ok: true, value: `${connections.length}/5000` },
       ],
     },
   }
@@ -365,9 +544,9 @@ export async function createAdminUser(
   if (users.some((u) => u.name === name && u.group === group)) {
     throw new Error(`「${group}」中已存在同名成员「${name}」`)
   }
-  const token = `jg_${randomHex(24)}`
+  const token = `jg_${randomHex(32)}`
   const user: AdminUser = {
-    id: `u_${randomHex(8).toUpperCase()}`,
+    id: `u_${randomHex(16)}`,
     name,
     group,
     role: payload.role,
@@ -376,9 +555,9 @@ export async function createAdminUser(
     monthlyTokens: payload.monthlyTokens,
     usedRequests: 0,
     usedTokens: 0,
-    tokenFingerprint: token.slice(3, 11),
-    createdAt: todayStr(),
-    lastActiveAt: '刚刚创建',
+    tokenHint: token.slice(0, 7),
+    createdAtMs: Date.now(),
+    lastActiveMs: 0,
   }
   writeLocalUsers([user, ...users])
   return { user, token }
@@ -428,10 +607,10 @@ export async function rotateAdminUserToken(
   const users = readLocalUsers()
   const target = users.find((u) => u.id === id)
   if (!target) throw new Error('用户不存在')
-  const token = `jg_${randomHex(24)}`
+  const token = `jg_${randomHex(32)}`
   const updated: AdminUser = {
     ...target,
-    tokenFingerprint: token.slice(3, 11),
+    tokenHint: token.slice(0, 7),
   }
   writeLocalUsers(users.map((u) => (u.id === id ? updated : u)))
   return { user: updated, token }
@@ -450,15 +629,12 @@ export async function deleteAdminUser(id: string): Promise<void> {
   writeLocalUsers(users.filter((u) => u.id !== id))
 }
 
-export async function batchSetUsersState(ids: string[], state: UserState): Promise<AdminUser[]> {
-  const remote = await tryApi<{ users: AdminUser[] }>('/api/admin/users/batch-state', {
+export async function batchSetUsersState(ids: string[], state: UserState): Promise<void> {
+  const remote = await tryApi<{ updated: number }>('/api/admin/users/batch-state', {
     method: 'PATCH',
     body: JSON.stringify({ ids, state }),
   })
-  if (remote?.users) {
-    writeLocalUsers(remote.users)
-    return remote.users
-  }
+  if (remote !== null) return
 
   const users = readLocalUsers()
   const idSet = new Set(ids)
@@ -470,7 +646,62 @@ export async function batchSetUsersState(ids: string[], state: UserState): Promi
   }
   const next = users.map((u) => (idSet.has(u.id) ? { ...u, state } : u))
   writeLocalUsers(next)
-  return next
+}
+
+export function calcHitRatePct(point: DailyTrendPoint): number {
+  if (point.promptTokens <= 0) return 0
+  return Math.min(100, Math.round((point.cachedTokens / point.promptTokens) * 1000) / 10)
+}
+
+export function calcTotalTokens(point: DailyTrendPoint): number {
+  return point.promptTokens + point.completionTokens
+}
+
+export function formatDateMs(ms: number): string {
+  if (!ms || ms <= 0) return '-'
+  const d = new Date(ms)
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
+}
+
+export function formatMonthDayMs(ms: number): string {
+  if (!ms || ms <= 0) return '--/--'
+  const d = new Date(ms)
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${m}/${day}`
+}
+
+export function formatRelativeMs(ms: number, emptyLabel = '尚未活跃'): string {
+  if (!ms || ms <= 0) return emptyLabel
+  const diffMs = Math.max(0, Date.now() - ms)
+  const mins = Math.floor(diffMs / 60_000)
+  if (mins < 1) return '刚刚'
+  if (mins < 60) return `${mins} 分钟前`
+  const hours = Math.floor(mins / 60)
+  if (hours < 24) return `${hours} 小时前`
+  return formatDateMs(ms)
+}
+
+export function formatUptimeMs(connectedAtMs: number): string {
+  if (!connectedAtMs || connectedAtMs <= 0) return '00m 00s'
+  const totalSecs = Math.max(0, Math.floor((Date.now() - connectedAtMs) / 1000))
+  const mins = Math.floor(totalSecs / 60)
+  const secs = totalSecs % 60
+  if (mins >= 60) {
+    const hours = Math.floor(mins / 60)
+    const remMins = mins % 60
+    return `${hours}h ${String(remMins).padStart(2, '0')}m`
+  }
+  return `${String(mins).padStart(2, '0')}m ${String(secs).padStart(2, '0')}s`
+}
+
+export function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
 export function formatTokens(n: number): string {
@@ -496,14 +727,14 @@ export function exportUsersCsv(users: AdminUser[]): void {
     String(u.monthlyTokens),
     String(u.usedRequests),
     String(u.dailyRequests),
-    u.createdAt,
+    formatDateMs(u.createdAtMs),
   ])
   const csv = [header, ...rows].map((r) => r.map((v) => `"${v.replaceAll('"', '""')}"`).join(',')).join('\n')
   const blob = new Blob([`\uFEFF${csv}`], { type: 'text/csv;charset=utf-8;' })
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
-  a.download = `users_${todayStr()}.csv`
+  a.download = `users_${formatDateMs(Date.now())}.csv`
   a.click()
   URL.revokeObjectURL(url)
 }
