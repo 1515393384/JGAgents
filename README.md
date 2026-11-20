@@ -73,7 +73,7 @@ engine_server_core/
 
 web/
 ├─ src/pages/{login,workbench,admin}
-├─ src/lib/{rpc,stream}
+├─ src/lib/{route-copy,mock}   文案唯一源 / 假数据
 └─ src/theme/
 ```
 
