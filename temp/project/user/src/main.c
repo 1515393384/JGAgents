@@ -54,13 +54,15 @@
 #define motor2_in2 TIM1_PWM_MAP3_CH1_E9
 
 #define servo_center 750
-#define kp 2.0f
-#define kd 0.5f
-#define ERROR_LPF_ALPHA 0.3f
-#define base_speed 1000
-#define max_speed 1500
-#define MOTOR_SCALE 3.0f
-#define MAX_MOTOR_TURN 2000
+#define SERVO_DIR 1
+#define kp 3.8f
+#define kd 1.8f
+#define ERROR_LPF_ALPHA 0.7f
+#define straight_speed 1450
+#define curve_speed 1150
+#define max_speed 2200
+#define MOTOR_SCALE 2.0f
+#define MAX_MOTOR_TURN 500
 #define MAX_SERVO_TURN 150
 #define CENTER_OK_RATIO 0.1f
 #define FRAME_TIMEOUT_MS 100
@@ -69,12 +71,13 @@ volatile uint32_t g_tick_ms = 0;
 
 // 二值化阈值节点：直方图统计 -> 类间方差遍历 -> 取方差最大处阈值
 // 调用方传全幅图像，与 bak 验证过的形态一致
-uint8_t get_otsu_threshold (uint8_t image[][MT9V03X_W], int width, int height) {
+uint8_t get_otsu_threshold (uint8_t image[][MT9V03X_W], int width, int height, int *out_contrast) {
     int histogram[256] = {0};
-    int total_pixels = width * height;
+    int start_y = height / 3;
+    int total_pixels = width * (height - start_y);
     float sum = 0;
 
-    for (int i = 0; i < height; i++) {
+    for (int i = start_y; i < height; i++) {
         for (int j = 0; j < width; j++) {
             histogram[image[i][j]]++;
             sum += image[i][j];
@@ -85,6 +88,7 @@ uint8_t get_otsu_threshold (uint8_t image[][MT9V03X_W], int width, int height) {
     int wB = 0;
     int wF = 0;
     float varMax = 0;
+    float best_diff = 0;
     uint8_t threshold = 0;
 
     for (int t = 0; t < 256; t++) {
@@ -97,11 +101,16 @@ uint8_t get_otsu_threshold (uint8_t image[][MT9V03X_W], int width, int height) {
         sumB += (float)(t * histogram[t]);
         float mB = sumB / wB;
         float mF = (sum - sumB) / wF;
-        float varBetween = (float)wB * (float)wF * (mB - mF) * (mB - mF);
+        float diff = mF - mB;
+        float varBetween = (float)wB * (float)wF * diff * diff;
         if (varBetween > varMax) {
             varMax = varBetween;
+            best_diff = diff;
             threshold = t;
         }
+    }
+    if (out_contrast) {
+        *out_contrast = (int)best_diff;
     }
     return threshold;
 }
@@ -156,7 +165,8 @@ int main (void) {
         last_frame_tick = g_tick_ms;
 
         // step 2 二值化：全图大津阈值 + 全图黑白化
-        otsu_T = get_otsu_threshold (mt9v03x_image, MT9V03X_W, MT9V03X_H);
+        int otsu_contrast = 0;
+        otsu_T = get_otsu_threshold (mt9v03x_image, MT9V03X_W, MT9V03X_H, &otsu_contrast);
         for (int i = 0; i < MT9V03X_H; i++) {
             for (int j = 0; j < MT9V03X_W; j++) {
                 if (mt9v03x_image[i][j] > otsu_T) {
@@ -169,7 +179,8 @@ int main (void) {
 
         // step 3 找线：种子列 + 全宽搜边；边找不齐缺省回种子列（bak 形态），全黑无道才无效
         int max_white_len = 0;
-        int start_x = MT9V03X_W / 2;
+        int seed_sum = 0;
+        int seed_cnt = 0;
         for (int x = 0; x < MT9V03X_W; x++) {
             int current_len = 0;
             for (int y = MT9V03X_H - 1; y >= 0; y--) {
@@ -181,34 +192,72 @@ int main (void) {
             }
             if (current_len > max_white_len) {
                 max_white_len = current_len;
-                start_x = x;
+                seed_sum = x;
+                seed_cnt = 1;
+            } else if (current_len == max_white_len && max_white_len > 0) {
+                seed_sum += x;
+                seed_cnt++;
+            }
+        }
+        int start_x = seed_cnt > 0 ? (seed_sum / seed_cnt) : (MT9V03X_W / 2);
+
+        int both_center_sum = 0;
+        int both_width_sum = 0;
+        int both_cnt = 0;
+        int fallback_sum = 0;
+        int fallback_cnt = 0;
+
+        int both_weight_sum = 0;
+
+        for (int row = MT9V03X_H - 20; row >= MT9V03X_H - 65; row -= 5) {
+            if (row < 0 || mt9v03x_image[row][start_x] == 0) {
+                continue;
+            }
+            int l = 0;
+            int r = MT9V03X_W - 1;
+            uint8_t lf = 0;
+            uint8_t rf = 0;
+            for (int x = start_x; x >= 1; x--) {
+                if (mt9v03x_image[row][x] == 0 && mt9v03x_image[row][x - 1] == 0) {
+                    l = x + 1;
+                    lf = 1;
+                    break;
+                }
+            }
+            for (int x = start_x; x < MT9V03X_W - 1; x++) {
+                if (mt9v03x_image[row][x] == 0 && mt9v03x_image[row][x + 1] == 0) {
+                    r = x - 1;
+                    rf = 1;
+                    break;
+                }
+            }
+            if (lf && rf && r > l + 10) {
+                both_center_sum += (l + r) / 2;
+                both_weight_sum += 1;
+                both_width_sum += (r - l);
+                both_cnt++;
+            } else if (lf && !rf) {
+                int rr = l + s_last_width;
+                if (rr > MT9V03X_W - 1) rr = MT9V03X_W - 1;
+                fallback_sum += (l + rr) / 2;
+                fallback_cnt++;
+            } else if (!lf && rf) {
+                int ll = r - s_last_width;
+                if (ll < 0) ll = 0;
+                fallback_sum += (ll + r) / 2;
+                fallback_cnt++;
+            } else if (!lf && !rf) {
+                fallback_sum += start_x;
+                fallback_cnt++;
             }
         }
 
-        int y_look = MT9V03X_H - 20;
-        int left_edge = start_x;
-        int right_edge = start_x;
-        uint8_t left_found = 0;
-        uint8_t right_found = 0;
-
-        for (int x = start_x; x >= 0; x--) {
-            if (mt9v03x_image[y_look][x] == 0) {
-                left_edge = x + 1;
-                left_found = 1;
-                break;
-            }
-        }
-        for (int x = start_x; x < MT9V03X_W; x++) {
-            if (mt9v03x_image[y_look][x] == 0) {
-                right_edge = x - 1;
-                right_found = 1;
-                break;
-            }
-        }
-        int center_x = (left_edge + right_edge) / 2;
-        uint8_t image_ok = (max_white_len >= 5);
-        if (left_found && right_found && right_edge > left_edge + 5) {
-            s_last_width = right_edge - left_edge;
+        int total_rows = both_cnt + fallback_cnt;
+        int cur_width = both_cnt > 0 ? (both_width_sum / both_cnt) : 0;
+        int center_x = both_weight_sum > 0 ? (both_center_sum / both_weight_sum) : (fallback_cnt > 0 ? (fallback_sum / fallback_cnt) : start_x);
+        uint8_t image_ok = (otsu_contrast >= 30 && otsu_T >= 95 && max_white_len >= 12 && total_rows > 0);
+        if (cur_width > 15) {
+            s_last_width = cur_width;
         }
 
         // step 4 直线闭环：有效帧 PD 纠偏直行；无效帧立即停车
@@ -220,16 +269,31 @@ int main (void) {
             float turn = kp * filt_error + kd * (filt_error - prev_error);
             prev_error = filt_error;
 
-            float servo_turn = turn;
+            float servo_turn = turn * SERVO_DIR;
             if (servo_turn > MAX_SERVO_TURN) servo_turn = MAX_SERVO_TURN;
             if (servo_turn < -MAX_SERVO_TURN) servo_turn = -MAX_SERVO_TURN;
             pwm_set_duty (servo, servo_center + servo_turn);
 
+            float abs_filt = filt_error > 0 ? filt_error : -filt_error;
+            int len_speed = straight_speed;
+            if (max_white_len <= 50) {
+                len_speed = curve_speed;
+            } else if (max_white_len < 85) {
+                len_speed = curve_speed + (straight_speed - curve_speed) * (max_white_len - 50) / 35;
+            }
+            int err_speed = straight_speed;
+            if (abs_filt >= 25.0f) {
+                err_speed = curve_speed;
+            } else if (abs_filt > 10.0f) {
+                err_speed = straight_speed - (int)((straight_speed - curve_speed) * (abs_filt - 10.0f) / 15.0f);
+            }
+            int target_speed = len_speed < err_speed ? len_speed : err_speed;
+
             float motor_turn = turn * MOTOR_SCALE;
             if (motor_turn > MAX_MOTOR_TURN) motor_turn = MAX_MOTOR_TURN;
             if (motor_turn < -MAX_MOTOR_TURN) motor_turn = -MAX_MOTOR_TURN;
-            int left_pwm = base_speed + motor_turn;
-            int right_pwm = base_speed - motor_turn;
+            int left_pwm = target_speed + motor_turn;
+            int right_pwm = target_speed - motor_turn;
             if (left_pwm > max_speed) left_pwm = max_speed;
             if (right_pwm > max_speed) right_pwm = max_speed;
             if (left_pwm < 0) left_pwm = 0;
@@ -262,7 +326,7 @@ int main (void) {
         tft180_show_string(48, 16, "L=");
         tft180_show_uint(64, 16, max_white_len, 3);
         tft180_show_string(0, 32, "W=");
-        tft180_show_uint(16, 32, (left_found && right_found) ? (right_edge - left_edge) : 0, 3);
+        tft180_show_uint(16, 32, cur_width, 3);
         tft180_show_string(48, 32, "ok=");
         tft180_show_uint(72, 32, image_ok, 1);
         tft180_show_string(0, 48, "e=");
