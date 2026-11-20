@@ -7,6 +7,7 @@ import {
   Download,
   MoreHorizontal,
   Plus,
+  RefreshCw,
   Search,
   ShieldAlert,
   UserCheck,
@@ -17,17 +18,17 @@ import {
 import { Avatar, Bar, Button, Stat } from '../../components/ui'
 import { ThemeMenu } from '../../components/theme-menu'
 import {
-  activeConnections,
   batchSetUsersState,
   createAdminUser,
   deleteAdminUser,
   exportUsersCsv,
+  fetchAdminOverview,
   fetchAdminUsers,
   formatCount,
   formatTokens,
   rotateAdminUserToken,
   updateAdminUser,
-  weeklyTrend,
+  type AdminOverview,
   type AdminTab,
   type AdminUser,
   type CreateUserPayload,
@@ -52,6 +53,7 @@ type SortKey = 'created' | 'usage' | 'requests'
 export function AdminPage() {
   const [tab, setTab] = useState<AdminTab>('users')
   const [users, setUsers] = useState<AdminUser[]>([])
+  const [overview, setOverview] = useState<AdminOverview | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [query, setQuery] = useState('')
@@ -70,6 +72,8 @@ export function AdminPage() {
     try {
       const list = await fetchAdminUsers()
       setUsers(list)
+      const ov = await fetchAdminOverview(list)
+      setOverview(ov)
     } catch (err) {
       setError(err instanceof Error ? err.message : '加载用户数据失败')
     } finally {
@@ -137,11 +141,28 @@ export function AdminPage() {
     const disabledCount = users.length - activeCount
     const usedTokens = users.reduce((s, u) => s + u.usedTokens, 0)
     const totalQuota = users.reduce((s, u) => s + u.monthlyTokens, 0)
-    const todayRequests = users.reduce((s, u) => s + u.usedRequests, 0)
+    const userRequests = users.reduce((s, u) => s + u.usedRequests, 0)
     const pct = totalQuota > 0 ? Math.round((usedTokens / totalQuota) * 100) : 0
-    const latestHit = weeklyTrend[weeklyTrend.length - 1]?.hitRate ?? 78
-    return { activeCount, disabledCount, usedTokens, totalQuota, todayRequests, pct, latestHit }
-  }, [users])
+    const trend = overview?.trend ?? []
+    const latestPoint = trend[trend.length - 1]
+    const todayRequests = latestPoint && overview?.source === 'remote' ? latestPoint.requests : userRequests
+    const latestHit = latestPoint?.hitRate ?? 0
+    const connCount = overview?.connections.length ?? 0
+    const maxConns = overview?.maxConns ?? 5000
+    const dbMode = overview?.source === 'remote' ? `SQLite ${overview.health.dbMode}` : '本地回退模式'
+    return {
+      activeCount,
+      disabledCount,
+      usedTokens,
+      totalQuota,
+      todayRequests,
+      pct,
+      latestHit,
+      connCount,
+      maxConns,
+      dbMode,
+    }
+  }, [users, overview])
 
   const allFilteredSelected =
     filtered.length > 0 && filtered.every((u) => selectedIds.has(u.id))
@@ -245,6 +266,16 @@ export function AdminPage() {
           </div>
 
           <div className="flex items-center gap-2 shrink-0">
+            <Button
+              variant="outline"
+              onClick={() => void load()}
+              disabled={loading}
+              aria-label="刷新数据"
+              className="whitespace-nowrap shrink-0"
+            >
+              <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
+              刷新
+            </Button>
             <ThemeMenu />
             <Button
               variant="primary"
@@ -310,8 +341,8 @@ export function AdminPage() {
           />
           <Stat
             label="活跃连接"
-            value={<span className="tabular-nums">{activeConnections.length}</span>}
-            hint="WS 控制面在线 · 限额 5,000"
+            value={<span className="tabular-nums">{summary.connCount}</span>}
+            hint={`${summary.dbMode} · 限额 ${formatCount(summary.maxConns)}`}
           />
         </section>
 
@@ -336,6 +367,7 @@ export function AdminPage() {
           <div className="mt-5 space-y-5">
             <UserCharts
               users={users}
+              trend={overview?.trend ?? []}
               selectedGroup={groupFilter}
               onSelectGroup={setGroupFilter}
             />
@@ -670,7 +702,13 @@ export function AdminPage() {
             </section>
           </div>
         ) : (
-          <AdminSubView tab={tab} users={users} />
+          <AdminSubView
+            tab={tab}
+            users={users}
+            overview={overview}
+            loading={loading}
+            onRefresh={() => void load()}
+          />
         )}
       </main>
 

@@ -63,6 +63,31 @@ export type ArchiveSummary = {
   updatedAt: string
 }
 
+export type HealthCheckItem = {
+  name: string
+  detail: string
+  ok: boolean
+}
+
+export type HealthSnapshot = {
+  ok: boolean
+  ver: number
+  dbMode: string
+  schemaVer: number
+  maxConns: number
+  activeConns: number
+  checks: HealthCheckItem[]
+}
+
+export type AdminOverview = {
+  source: 'remote' | 'local'
+  trend: DailyTrendPoint[]
+  connections: ActiveConnection[]
+  archives: ArchiveSummary[]
+  health: HealthSnapshot
+  maxConns: number
+}
+
 const STORAGE_KEY = 'jiagou.admin.users.v1'
 
 const SEED_USERS: AdminUser[] = [
@@ -277,6 +302,51 @@ export async function fetchAdminUsers(): Promise<AdminUser[]> {
   return readLocalUsers()
 }
 
+export async function fetchAdminOverview(localUsers?: AdminUser[]): Promise<AdminOverview> {
+  const remote = await tryApi<{
+    trend?: DailyTrendPoint[]
+    connections?: ActiveConnection[]
+    archives?: ArchiveSummary[]
+    health?: HealthSnapshot
+    maxConns?: number
+  }>('/api/admin/overview')
+
+  if (remote?.health) {
+    return {
+      source: 'remote',
+      trend: remote.trend ?? [],
+      connections: remote.connections ?? [],
+      archives: remote.archives ?? [],
+      health: remote.health,
+      maxConns: remote.maxConns ?? remote.health.maxConns ?? 5000,
+    }
+  }
+
+  const users = localUsers ?? readLocalUsers()
+  const activeAdmins = users.filter((u) => u.role === 'admin' && u.state === 'active').length
+  return {
+    source: 'local',
+    trend: weeklyTrend,
+    connections: activeConnections,
+    archives: archiveSummaries,
+    maxConns: 5000,
+    health: {
+      ok: activeAdmins > 0,
+      ver: 1,
+      dbMode: 'local-fallback',
+      schemaVer: 1,
+      maxConns: 5000,
+      activeConns: activeConnections.length,
+      checks: [
+        { name: 'HTTP /healthz 探针', detail: '当前未检测到后端服务 · 使用本地回退数据', ok: false },
+        { name: 'SQLite 存储与写通道', detail: '本地浏览器预览模式（未连接引擎）', ok: true },
+        { name: 'Schema 版本迁移', detail: 'schema_ver = v1（预期基线）', ok: true },
+        { name: '管理员引导与隔离检查', detail: `本地启用管理员 ${activeAdmins} 人`, ok: activeAdmins > 0 },
+      ],
+    },
+  }
+}
+
 export async function createAdminUser(
   payload: CreateUserPayload,
 ): Promise<{ user: AdminUser; token: string }> {
@@ -381,6 +451,15 @@ export async function deleteAdminUser(id: string): Promise<void> {
 }
 
 export async function batchSetUsersState(ids: string[], state: UserState): Promise<AdminUser[]> {
+  const remote = await tryApi<{ users: AdminUser[] }>('/api/admin/users/batch-state', {
+    method: 'PATCH',
+    body: JSON.stringify({ ids, state }),
+  })
+  if (remote?.users) {
+    writeLocalUsers(remote.users)
+    return remote.users
+  }
+
   const users = readLocalUsers()
   const idSet = new Set(ids)
   const remainingActiveAdmins = users.filter(

@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { formatTokens, weeklyTrend, type AdminUser } from '../../lib/admin-users'
+import { formatTokens, type AdminUser, type DailyTrendPoint } from '../../lib/admin-users'
 
 type GroupStat = {
   group: string
@@ -12,10 +12,12 @@ type GroupStat = {
 
 export function UserCharts({
   users,
+  trend,
   selectedGroup,
   onSelectGroup,
 }: {
   users: AdminUser[]
+  trend: DailyTrendPoint[]
   selectedGroup: string
   onSelectGroup: (group: string) => void
 }) {
@@ -47,24 +49,30 @@ export function UserCharts({
   const innerW = W - PAD_X * 2
   const innerH = H - PAD_Y * 2
 
-  const maxReq = Math.max(...weeklyTrend.map((d) => d.requests), 1500)
-  const reqPoints = weeklyTrend.map((d, i) => {
-    const x = PAD_X + (i / Math.max(1, weeklyTrend.length - 1)) * innerW
+  const maxReq = Math.max(...trend.map((d) => d.requests), 10)
+  const reqPoints = trend.map((d, i) => {
+    const x = PAD_X + (i / Math.max(1, trend.length - 1)) * innerW
     const y = PAD_Y + innerH - (d.requests / maxReq) * innerH
     return { x, y, ...d }
   })
-  const hitPoints = weeklyTrend.map((d, i) => {
-    const x = PAD_X + (i / Math.max(1, weeklyTrend.length - 1)) * innerW
+  const hitPoints = trend.map((d, i) => {
+    const x = PAD_X + (i / Math.max(1, trend.length - 1)) * innerW
     const y = PAD_Y + innerH - (d.hitRate / 100) * innerH
     return { x, y }
   })
 
   const reqLine = reqPoints.map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ')
-  const reqArea = `${reqLine} L${reqPoints[reqPoints.length - 1]?.x.toFixed(1) ?? PAD_X},${PAD_Y + innerH} L${PAD_X},${PAD_Y + innerH} Z`
+  const reqArea =
+    reqPoints.length > 0
+      ? `${reqLine} L${reqPoints[reqPoints.length - 1]?.x.toFixed(1) ?? PAD_X},${PAD_Y + innerH} L${PAD_X},${PAD_Y + innerH} Z`
+      : ''
   const hitLine = hitPoints.map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ')
 
   const activePoint = hoverIdx !== null ? reqPoints[hoverIdx] : reqPoints[reqPoints.length - 1]
-  const avgHit = Math.round(weeklyTrend.reduce((acc, d) => acc + d.hitRate, 0) / weeklyTrend.length)
+  const avgHit =
+    trend.length > 0
+      ? Math.round(trend.reduce((acc, d) => acc + d.hitRate, 0) / trend.length)
+      : 0
 
   return (
     <div className="grid grid-cols-1 gap-3 lg:grid-cols-12">
@@ -148,97 +156,103 @@ export function UserCharts({
         </div>
 
         <div className="mt-2">
-          <svg
-            viewBox={`0 0 ${W} ${H}`}
-            className="h-[156px] w-full overflow-visible select-none"
-            onMouseLeave={() => setHoverIdx(null)}
-          >
-            <defs>
-              <linearGradient id="reqAreaGrad" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stopColor="var(--brand)" stopOpacity="0.22" />
-                <stop offset="100%" stopColor="var(--brand)" stopOpacity="0" />
-              </linearGradient>
-            </defs>
+          {trend.length === 0 ? (
+            <div className="flex h-[156px] items-center justify-center text-xs text-fg-subtle">
+              暂无 7 日用量入账记录
+            </div>
+          ) : (
+            <svg
+              viewBox={`0 0 ${W} ${H}`}
+              className="h-[156px] w-full overflow-visible select-none"
+              onMouseLeave={() => setHoverIdx(null)}
+            >
+              <defs>
+                <linearGradient id="reqAreaGrad" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor="var(--brand)" stopOpacity="0.22" />
+                  <stop offset="100%" stopColor="var(--brand)" stopOpacity="0" />
+                </linearGradient>
+              </defs>
 
-            {[0.25, 0.5, 0.75, 1].map((ratio) => {
-              const y = PAD_Y + innerH * (1 - ratio)
-              return (
-                <line
-                  key={ratio}
-                  x1={PAD_X}
-                  x2={W - PAD_X}
-                  y1={y}
-                  y2={y}
-                  stroke="var(--border)"
-                  strokeDasharray="3 3"
-                  strokeWidth="1"
-                />
-              )
-            })}
-
-            <path d={reqArea} fill="url(#reqAreaGrad)" />
-            <path d={reqLine} fill="none" stroke="var(--brand)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-            <path
-              d={hitLine}
-              fill="none"
-              stroke="var(--ok)"
-              strokeWidth="1.75"
-              strokeDasharray="4 3"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-
-            {reqPoints.map((p, i) => {
-              const hp = hitPoints[i]
-              const isHover = hoverIdx === i
-              return (
-                <g key={p.day}>
-                  {isHover ? (
-                    <line
-                      x1={p.x}
-                      x2={p.x}
-                      y1={PAD_Y}
-                      y2={PAD_Y + innerH}
-                      stroke="var(--border-strong)"
-                      strokeWidth="1"
-                    />
-                  ) : null}
-                  <circle
-                    cx={p.x}
-                    cy={p.y}
-                    r={isHover ? 4 : 2.5}
-                    fill="var(--surface)"
-                    stroke="var(--brand)"
-                    strokeWidth="2"
+              {[0.25, 0.5, 0.75, 1].map((ratio) => {
+                const y = PAD_Y + innerH * (1 - ratio)
+                return (
+                  <line
+                    key={ratio}
+                    x1={PAD_X}
+                    x2={W - PAD_X}
+                    y1={y}
+                    y2={y}
+                    stroke="var(--border)"
+                    strokeDasharray="3 3"
+                    strokeWidth="1"
                   />
-                  {hp ? (
+                )
+              })}
+
+              <path d={reqArea} fill="url(#reqAreaGrad)" />
+              <path d={reqLine} fill="none" stroke="var(--brand)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+              <path
+                d={hitLine}
+                fill="none"
+                stroke="var(--ok)"
+                strokeWidth="1.75"
+                strokeDasharray="4 3"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+
+              {reqPoints.map((p, i) => {
+                const hp = hitPoints[i]
+                const isHover = hoverIdx === i
+                return (
+                  <g key={`${p.day}-${i}`}>
+                    {isHover ? (
+                      <line
+                        x1={p.x}
+                        x2={p.x}
+                        y1={PAD_Y}
+                        y2={PAD_Y + innerH}
+                        stroke="var(--border-strong)"
+                        strokeWidth="1"
+                      />
+                    ) : null}
                     <circle
-                      cx={hp.x}
-                      cy={hp.y}
-                      r={isHover ? 3.5 : 2}
-                      fill="var(--ok)"
+                      cx={p.x}
+                      cy={p.y}
+                      r={isHover ? 4 : 2.5}
+                      fill="var(--surface)"
+                      stroke="var(--brand)"
+                      strokeWidth="2"
                     />
-                  ) : null}
-                  <text
-                    x={p.x}
-                    y={H - 2}
-                    textAnchor="middle"
-                    className="fill-[var(--fg-subtle)] font-mono text-[10px]"
-                  >
-                    {p.day}
-                  </text>
-                  <rect
-                    x={p.x - innerW / (weeklyTrend.length * 2)}
-                    y={0}
-                    width={innerW / weeklyTrend.length}
-                    height={H}
-                    fill="transparent"
-                    onMouseEnter={() => setHoverIdx(i)}
-                  />
-                </g>
-              )
-            })}
-          </svg>
+                    {hp ? (
+                      <circle
+                        cx={hp.x}
+                        cy={hp.y}
+                        r={isHover ? 3.5 : 2}
+                        fill="var(--ok)"
+                      />
+                    ) : null}
+                    <text
+                      x={p.x}
+                      y={H - 2}
+                      textAnchor="middle"
+                      className="fill-[var(--fg-subtle)] font-mono text-[10px]"
+                    >
+                      {p.day}
+                    </text>
+                    <rect
+                      x={p.x - innerW / (trend.length * 2)}
+                      y={0}
+                      width={innerW / trend.length}
+                      height={H}
+                      fill="transparent"
+                      onMouseEnter={() => setHoverIdx(i)}
+                    />
+                  </g>
+                )
+              })}
+            </svg>
+          )}
         </div>
       </div>
     </div>

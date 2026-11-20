@@ -55,15 +55,14 @@
 
 #define servo_center 750
 #define SERVO_DIR 1
-#define kp 3.8f
-#define kd 1.8f
-#define ERROR_LPF_ALPHA 0.7f
-#define straight_speed 1450
-#define curve_speed 1150
+#define kp 2.6f
+#define kd 1.4f
+#define ERROR_LPF_ALPHA 0.65f
+#define base_speed 1350
 #define max_speed 2200
-#define MOTOR_SCALE 2.0f
-#define MAX_MOTOR_TURN 500
 #define MAX_SERVO_TURN 150
+#define DEADBAND_RATIO 0.08f
+#define CROSS_WIDTH_RATIO 1.35f
 #define CENTER_OK_RATIO 0.1f
 #define FRAME_TIMEOUT_MS 100
 
@@ -147,7 +146,7 @@ int main (void) {
     float filt_error = 0;
     float prev_error = 0;
     uint32_t last_frame_tick = 0;
-    static int s_last_width = MT9V03X_W / 2;
+    static int s_last_width = 105;
 
     while (1) {
         // step 1 检测入口：等待摄像头新帧；超时无帧按丢线停车
@@ -204,10 +203,10 @@ int main (void) {
         int both_center_sum = 0;
         int both_width_sum = 0;
         int both_cnt = 0;
+        int cross_cnt = 0;
         int fallback_sum = 0;
         int fallback_cnt = 0;
-
-        int both_weight_sum = 0;
+        int max_valid_width = (int)(s_last_width * CROSS_WIDTH_RATIO);
 
         for (int row = MT9V03X_H - 20; row >= MT9V03X_H - 65; row -= 5) {
             if (row < 0 || mt9v03x_image[row][start_x] == 0) {
@@ -231,11 +230,15 @@ int main (void) {
                     break;
                 }
             }
-            if (lf && rf && r > l + 10) {
-                both_center_sum += (l + r) / 2;
-                both_weight_sum += 1;
-                both_width_sum += (r - l);
-                both_cnt++;
+            if (lf && rf) {
+                int w = r - l;
+                if (w > 15 && w <= max_valid_width) {
+                    both_center_sum += (l + r) / 2;
+                    both_width_sum += w;
+                    both_cnt++;
+                } else if (w > max_valid_width) {
+                    cross_cnt++;
+                }
             } else if (lf && !rf) {
                 int rr = l + s_last_width;
                 if (rr > MT9V03X_W - 1) rr = MT9V03X_W - 1;
@@ -247,14 +250,14 @@ int main (void) {
                 fallback_sum += (ll + r) / 2;
                 fallback_cnt++;
             } else if (!lf && !rf) {
-                fallback_sum += start_x;
-                fallback_cnt++;
+                cross_cnt++;
             }
         }
 
-        int total_rows = both_cnt + fallback_cnt;
+        int total_rows = both_cnt + cross_cnt + fallback_cnt;
         int cur_width = both_cnt > 0 ? (both_width_sum / both_cnt) : 0;
-        int center_x = both_weight_sum > 0 ? (both_center_sum / both_weight_sum) : (fallback_cnt > 0 ? (fallback_sum / fallback_cnt) : start_x);
+        uint8_t is_cross = (both_cnt == 0 && cross_cnt > 0 && max_white_len >= 50);
+        int center_x = both_cnt > 0 ? (both_center_sum / both_cnt) : (is_cross ? (MT9V03X_W / 2) : (fallback_cnt > 0 ? (fallback_sum / fallback_cnt) : start_x));
         uint8_t image_ok = (otsu_contrast >= 30 && otsu_T >= 95 && max_white_len >= 12 && total_rows > 0);
         if (cur_width > 15) {
             s_last_width = cur_width;
@@ -266,43 +269,31 @@ int main (void) {
             image_valid = 1;
 
             filt_error += ERROR_LPF_ALPHA * (image_error - filt_error);
-            float turn = kp * filt_error + kd * (filt_error - prev_error);
-            prev_error = filt_error;
+            int deadband = (int)(s_last_width * DEADBAND_RATIO);
+            if (deadband < 4) deadband = 4;
+            if (deadband > 10) deadband = 10;
 
-            float servo_turn = turn * SERVO_DIR;
+            float abs_err = filt_error > 0 ? filt_error : -filt_error;
+            float eff_error = 0.0f;
+            if (abs_err > (float)deadband) {
+                eff_error = filt_error > 0 ? (filt_error - deadband) : (filt_error + deadband);
+            }
+
+            float turn = kp * eff_error + kd * (eff_error - prev_error);
+            prev_error = eff_error;
+
+            float servo_turn = (abs_err <= (float)deadband) ? 0.0f : (turn * SERVO_DIR);
             if (servo_turn > MAX_SERVO_TURN) servo_turn = MAX_SERVO_TURN;
             if (servo_turn < -MAX_SERVO_TURN) servo_turn = -MAX_SERVO_TURN;
             pwm_set_duty (servo, servo_center + servo_turn);
 
-            float abs_filt = filt_error > 0 ? filt_error : -filt_error;
-            int len_speed = straight_speed;
-            if (max_white_len <= 50) {
-                len_speed = curve_speed;
-            } else if (max_white_len < 85) {
-                len_speed = curve_speed + (straight_speed - curve_speed) * (max_white_len - 50) / 35;
-            }
-            int err_speed = straight_speed;
-            if (abs_filt >= 25.0f) {
-                err_speed = curve_speed;
-            } else if (abs_filt > 10.0f) {
-                err_speed = straight_speed - (int)((straight_speed - curve_speed) * (abs_filt - 10.0f) / 15.0f);
-            }
-            int target_speed = len_speed < err_speed ? len_speed : err_speed;
-
-            float motor_turn = turn * MOTOR_SCALE;
-            if (motor_turn > MAX_MOTOR_TURN) motor_turn = MAX_MOTOR_TURN;
-            if (motor_turn < -MAX_MOTOR_TURN) motor_turn = -MAX_MOTOR_TURN;
-            int left_pwm = target_speed + motor_turn;
-            int right_pwm = target_speed - motor_turn;
-            if (left_pwm > max_speed) left_pwm = max_speed;
-            if (right_pwm > max_speed) right_pwm = max_speed;
-            if (left_pwm < 0) left_pwm = 0;
-            if (right_pwm < 0) right_pwm = 0;
-            // 前进通道按本机接线取 IN2；若实测倒走，交换两对 PWM 即可
+            int target_speed = base_speed;
+            if (target_speed > max_speed) target_speed = max_speed;
+            if (target_speed < 0) target_speed = 0;
             pwm_set_duty (motor1_in1, 0);
-            pwm_set_duty (motor1_in2, left_pwm);
+            pwm_set_duty (motor1_in2, target_speed);
             pwm_set_duty (motor2_in1, 0);
-            pwm_set_duty (motor2_in2, right_pwm);
+            pwm_set_duty (motor2_in2, target_speed);
         } else {
             image_valid = 0;
             filt_error = 0;
