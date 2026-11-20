@@ -4,6 +4,12 @@ dist/
 .vite/
 target/
 
+# 本地数据（SQLite 运行库）
+data/
+*.db
+*.db-wal
+*.db-shm
+
 # 日志与临时
 *.log
 dev.log
