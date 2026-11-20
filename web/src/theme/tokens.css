@@ -1,0 +1,545 @@
+/* 主题 —— 全站颜色 / 圆角的唯一来源。
+ * 取值对齐参考站（docs.openapi.net）的真实 token，不是猜的。
+ */
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  /* 背景三档：页面 / 次级（按钮、输入）/ 浮起（卡片）
+   * 不用纯白：纯白一整屏会发刺，改成带一点暖的纸色（纸白），
+   * 冷暖差维持在 3% 以内——够看出层次，又不至于像米黄色旧界面。 */
+  --bg: #efeeec;
+  --bg-subtle: #e5e3e0;
+  --bg-elevated: #eae8e5;
+  --bg-accent: #d5d2cd80;
+
+  /* 前景三档 */
+  --fg: #1b1a18;
+  --fg-muted: #625e58;
+  --fg-subtle: #827d76;
+
+  /* 强调色 */
+  --brand: #3ea4ec;
+  --brand-hover: #2b96e0;
+  --brand-fg: #ffffff;
+  --brand-soft: rgba(62, 164, 236, 0.12);
+
+  /* 语义色：只表示状态 */
+  --ok: #15803d;
+  --warn: #b45309;
+  --danger: #b91c1c;
+
+  --border: rgba(40, 34, 28, 0.14);
+  --border-strong: rgba(40, 34, 28, 0.22);
+
+  /* 卡片面：比页面更亮一级，靠"亮+投影"浮起来，而不是靠画边框。
+   * 这是现代卡片感的关键——页面灰、卡片白，两者同色就会被看成表格。 */
+  --surface: #fbfaf8;
+  --surface-sunken: #f3f1ee;
+  --surface-border: rgba(40, 34, 28, 0.085);
+  --sh-card: 0 1px 2px rgba(15, 23, 42, 0.05), 0 10px 30px -18px rgba(15, 23, 42, 0.22);
+  --sh-float: 0 2px 6px rgba(15, 23, 42, 0.06), 0 22px 50px -22px rgba(15, 23, 42, 0.3);
+
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.06);
+
+  /* 背景撞色：一亮一暖。亮底不能用加色（白上叠加等于没画），
+   * 所以直接给"带透明度的实色"，落在 #f5f5f5 上是可见的雾，
+   * 落在 #242322 上换更高一档的明度，观感才对得上。 */
+  --glow-cool: rgba(62, 164, 236, 0.18);
+  --glow-warm: rgba(255, 112, 88, 0.15);
+  --glow-veil: rgba(124, 92, 255, 0.12);
+
+  /* 毛玻璃：亮色是"白玻璃"，暗色是"烟玻璃" */
+  --glass-bg: rgba(255, 255, 255, 0.55);
+  --glass-border: rgba(255, 255, 255, 0.65);
+  --glass-highlight: rgba(255, 255, 255, 0.9);
+  --glass-shadow: 0 24px 70px -30px rgba(15, 23, 42, 0.45);
+  --field-bg: rgba(255, 255, 255, 0.6);
+
+  --grid-line: rgba(40, 34, 28, 0.05);
+  --strand: rgba(62, 164, 236, 0.46);
+  --strand-hot: rgba(12, 74, 135, 0.85);
+  --edge-vignette: rgba(40, 34, 28, 0.1);
+
+  --font-sans: 'Public Sans', system-ui, -apple-system, 'Segoe UI', 'PingFang SC',
+    'Microsoft YaHei', sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, 'Cascadia Code', Consolas, monospace;
+}
+
+/* 暗色基 = 暗夜（VSCode Dark Modern 的中性灰）：
+ * 页面 #1f1f1f、侧栏 #191919、卡片 #262626、描边 #2b2b2b。
+ * 不用纯黑：#1e1e1e 及以下会把字烧出光晕，也分不出层。 */
+.dark {
+  --bg: #1f1f1f;
+  --bg-subtle: #2b2b2b;
+  --bg-elevated: #262626;
+  --bg-accent: #3a3a3a80;
+
+  --fg: #e4e4e4;
+  --fg-muted: #a2a2a2;
+  --fg-subtle: #7d7d7d;
+
+  --brand: #4daafc;
+  --brand-hover: #6bb8ff;
+  --brand-fg: #0a1c2b;
+  --brand-soft: rgba(77, 170, 252, 0.16);
+
+  --ok: #3fb950;
+  --warn: #d29922;
+  --danger: #f85149;
+
+  --border: rgba(255, 255, 255, 0.12);
+  --border-strong: rgba(255, 255, 255, 0.22);
+
+  --surface: #262626;
+  --surface-sunken: #191919;
+  --surface-border: #2b2b2b;
+  --sh-card: 0 1px 2px rgba(0, 0, 0, 0.4), 0 12px 32px -20px rgba(0, 0, 0, 0.7);
+  --sh-float: 0 2px 8px rgba(0, 0, 0, 0.45), 0 26px 60px -26px rgba(0, 0, 0, 0.85);
+
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.6);
+
+  /* 暗底反过来：同色相加色才亮，透明度给到更高，撞色才压得住深色 */
+  --glow-cool: rgba(96, 176, 255, 0.28);
+  --glow-warm: rgba(255, 138, 92, 0.24);
+  --glow-veil: rgba(167, 139, 250, 0.22);
+
+  --glass-bg: rgba(255, 255, 255, 0.06);
+  --glass-border: rgba(255, 255, 255, 0.14);
+  --glass-highlight: rgba(255, 255, 255, 0.1);
+  --glass-shadow: 0 24px 70px -30px rgba(0, 0, 0, 0.7);
+  --field-bg: rgba(0, 0, 0, 0.22);
+
+  --grid-line: rgba(255, 255, 255, 0.045);
+  --strand: rgba(150, 200, 255, 0.46);
+  --strand-hot: rgba(236, 248, 255, 0.95);
+  --edge-vignette: rgba(0, 0, 0, 0.5);
+}
+
+/* ── 主题预设 ──
+ * 只覆盖差异项，其余继承上面的亮/暗基座。换主题 = 换 data-theme，
+ * 所以"导入一套主题"就是往这里加一段变量，客户端不需要改任何组件。 */
+
+/* 亮 · 雾灰（冷调、对比略高，长文阅读用） */
+:root[data-theme='mist'] {
+  --bg: #e9eaec;
+  --bg-subtle: #dde0e3;
+  --bg-elevated: #e4e6e9;
+  --fg: #16181b;
+  --fg-muted: #565c64;
+  --fg-subtle: #767d86;
+  --brand: #2f80ed;
+  --brand-hover: #1f6fdc;
+  --brand-soft: rgba(47, 128, 237, 0.12);
+  --border: rgba(20, 26, 36, 0.14);
+  --border-strong: rgba(20, 26, 36, 0.22);
+  --surface: #fafbfc;
+  --surface-sunken: #eff1f3;
+  --surface-border: rgba(20, 26, 36, 0.085);
+}
+
+/* 暗 · 炭灰（暖炭，跟纸白一个色系；觉得中性灰太冷就用它） */
+.dark[data-theme='warm'] {
+  --bg: #242322;
+  --bg-subtle: #35322f;
+  --bg-elevated: #2a2927;
+  --fg: #f0eeeb;
+  --fg-muted: #b3afa8;
+  --fg-subtle: #8d8880;
+  --brand: #6cb6ff;
+  --brand-hover: #8ec7ff;
+  --surface: #302e2c;
+  --surface-sunken: #282624;
+  --surface-border: rgba(255, 255, 255, 0.09);
+  --border: rgba(255, 255, 255, 0.11);
+}
+
+/* 暗 · 深蓝夜（One Dark 血统：偏蓝的底，代码更护眼） */
+.dark[data-theme='onedark'] {
+  --bg: #282c34;
+  --bg-subtle: #333842;
+  --bg-elevated: #2f343d;
+  --fg: #dce0e6;
+  --fg-muted: #9aa3b0;
+  --fg-subtle: #737d8c;
+  --brand: #61afef;
+  --brand-hover: #7ec0f5;
+  --brand-soft: rgba(97, 175, 239, 0.16);
+  --surface: #2f343d;
+  --surface-sunken: #22252b;
+  --surface-border: #363c46;
+  --border: rgba(255, 255, 255, 0.12);
+}
+
+
+/* ── 鼠标指针：自绘 SVG，不是系统箭头 ──
+ * 亮底给深色箭头配白描边，暗底反过来；热点写在 url 后面（箭尖 5,2 / 圆点 11,11）。
+ * SVG cursor 在 Chrome/Edge/Firefox 可用，Safari 会回落到后面的关键字（default/pointer）。 */
+:root {
+  --cur-arrow: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 26 26'><path d='M5 2.4 L5 20.6 L9.9 15.9 L12.7 22.3 L15.7 20.9 L12.9 14.6 L19.5 14.6 Z' fill='%230f172a' stroke='%23ffffff' stroke-width='1.5' stroke-linejoin='round'/></svg>");
+  --cur-link: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='18' height='18' viewBox='0 0 22 22'><circle cx='11' cy='11' r='8' fill='rgba(62,164,236,0.16)' stroke='%233ea4ec' stroke-width='1.6'/><circle cx='11' cy='11' r='2.1' fill='%233ea4ec'/></svg>");
+}
+
+.dark {
+  --cur-arrow: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 26 26'><path d='M5 2.4 L5 20.6 L9.9 15.9 L12.7 22.3 L15.7 20.9 L12.9 14.6 L19.5 14.6 Z' fill='%23eaf6ff' stroke='%23071c2c' stroke-width='1.5' stroke-linejoin='round'/></svg>");
+  --cur-link: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='18' height='18' viewBox='0 0 22 22'><circle cx='11' cy='11' r='8' fill='rgba(108,182,255,0.22)' stroke='%236cb6ff' stroke-width='1.6'/><circle cx='11' cy='11' r='2.1' fill='%236cb6ff'/></svg>");
+}
+
+html {
+  cursor: var(--cur-arrow) 4 2, default;
+}
+
+a,
+button,
+label,
+summary,
+select,
+[role='button'],
+[role='tab'],
+[role='link'],
+[type='checkbox'],
+[type='radio'],
+[type='submit'],
+[type='button'] {
+  cursor: var(--cur-link) 9 9, pointer;
+}
+
+input:not([type='checkbox']):not([type='radio']):not([type='submit']):not([type='button']),
+textarea {
+  cursor: text;
+}
+
+:disabled,
+[aria-disabled='true'] {
+  cursor: not-allowed;
+}
+
+/* 触屏没有指针：一条都不加，省得吃掉原生行为 */
+@media (hover: none), (pointer: coarse) {
+  html,
+  a,
+  button,
+  label,
+  summary,
+  select,
+  [role='button'],
+  [role='tab'],
+  [role='link'],
+  [type='checkbox'],
+  [type='radio'],
+  [type='submit'],
+  [type='button'] {
+    cursor: auto;
+  }
+}
+
+/* 把变量接进 Tailwind 的命名空间。inline 是必须的，否则暗色切换拿不到新值。 */
+@theme inline {
+  --color-bg: var(--bg);
+  --color-bg-subtle: var(--bg-subtle);
+  --color-bg-elevated: var(--bg-elevated);
+  --color-bg-accent: var(--bg-accent);
+
+  --color-fg: var(--fg);
+  --color-fg-muted: var(--fg-muted);
+  --color-fg-subtle: var(--fg-subtle);
+
+  --color-brand: var(--brand);
+  --color-brand-hover: var(--brand-hover);
+  --color-brand-fg: var(--brand-fg);
+  --color-brand-soft: var(--brand-soft);
+
+  --color-ok: var(--ok);
+  --color-warn: var(--warn);
+  --color-danger: var(--danger);
+
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+
+  --color-surface: var(--surface);
+  --color-surface-sunken: var(--surface-sunken);
+  --color-surface-border: var(--surface-border);
+
+  --shadow-card: var(--sh-card);
+  --shadow-float: var(--sh-float);
+
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+
+  /* 圆角四档：卡 16 / 面板 20 / 输入 14 / 胶囊 */
+  --radius-card: 16px;
+  --radius-panel: 20px;
+  --radius-field: 10px;
+  --radius-shell: 14px;
+  --radius-pill: 999px;
+}
+
+/* 毛玻璃卡：半透明 + 模糊 + 内高光线 + 投影。
+ * 高光线（inset 1px 白）是"玻璃有厚度"的唯一来源，去掉就变成一块半透明塑料。 */
+@utility glass {
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  /* 只写标准属性：Lightning CSS 会按目标浏览器补 -webkit- 前缀。
+   * 自己再写一条 -webkit- 反而会把它顶掉，Firefox 就没模糊了。 */
+  backdrop-filter: blur(20px) saturate(150%);
+  box-shadow:
+    inset 0 1px 0 var(--glass-highlight),
+    var(--glass-shadow);
+}
+
+/* 玻璃里的输入框：比玻璃再深一层，保证文字对比度 */
+@utility glass-field {
+  background: var(--field-bg);
+  backdrop-filter: blur(8px);
+}
+
+/* 点阵底：装饰图的地基。透明度交给调用处控制。 */
+@utility dots {
+  background-image: radial-gradient(var(--border-strong) 1px, transparent 1px);
+  background-size: 16px 16px;
+  background-position: center;
+}
+
+/* 点阵慢漂：走满一个 16px 循环块，接缝看不出来。
+   以前动 background-position —— 那是整屏重绘，60fps 白烧。现在动 transform，
+   交给合成器，主线程一帧都不占。外层负责裁洞，内层负责漂移。 */
+@utility dots-slow {
+  animation: dots-drift 24s linear infinite;
+  will-change: transform;
+}
+
+/* 打字光标：硬闪（steps），并提前分到合成层 —— 闪烁不再逐帧改样式 */
+@utility caret-blink {
+  animation: caret-blink 1.1s steps(1, end) infinite;
+  will-change: opacity;
+}
+
+/* 点阵也按同一个洞裁掉：径向淡出 + 卡片矩形 exclude，
+   两层 mask 叠加，点阵不会透过玻璃在卡片上显出来。 */
+@utility dots-cut {
+  mask-image:
+    radial-gradient(closest-side at 50% 45%, #000 30%, transparent 78%),
+    linear-gradient(#000, #000);
+  mask-size: 100% 100%, var(--hole-w, 0px) var(--hole-h, 0px);
+  mask-position: 0 0, var(--hole-x, -9999px) var(--hole-y, -9999px);
+  mask-repeat: no-repeat, no-repeat;
+  mask-composite: exclude;
+}
+
+/* 方格纸：空白边缘的底纹。32px 一格，线只有 1px 且极淡，
+   只做"这是张纸"的暗示，不参与任何信息层级。 */
+@utility grid-paper {
+  background-image:
+    linear-gradient(to right, var(--grid-line) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--grid-line) 1px, transparent 1px);
+  background-size: 32px 32px;
+  background-position: center;
+  /* 中间那块按面板矩形挖掉：两层 mask 用 exclude 合成，洞的位置由 JS 写进四个变量。
+     变量缺省时洞在屏幕外，网格铺满（首帧也安全）。 */
+  mask-image: linear-gradient(#000, #000), linear-gradient(#000, #000);
+  mask-size: 100% 100%, var(--hole-w, 0px) var(--hole-h, 0px);
+  mask-position: 0 0, var(--hole-x, -9999px) var(--hole-y, -9999px);
+  mask-repeat: no-repeat, no-repeat;
+  mask-composite: exclude;
+}
+
+@keyframes dots-drift {
+  to {
+    transform: translate3d(16px, 16px, 0);
+  }
+}
+
+@keyframes caret-blink {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0;
+  }
+}
+
+/* 流动的数据带：一条重复渐变横向走，比逐个圆点动画便宜得多。 */
+@utility flow {
+  background-image: repeating-linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--brand) 75%, transparent) 0 6px,
+    transparent 6px 18px
+  );
+  animation: flow-x 1.1s linear infinite;
+}
+
+@keyframes flow-x {
+  to {
+    background-position-x: 18px;
+  }
+}
+
+/* 边缘对撞：一个领头的撞墙，两个跟班跟在后面左右对称。
+   领头跑在正中线上，每到一个拐角撞一下、亮一下（0/25/50/75 四处）；
+   跟班用 sweep-follow：落后 1.2% 起，越拖越远到 6%，撞墙那一下硬追回来 ——
+   所以每撞一次，后面就跟上来对齐一份。一圈 7s。 */
+@utility sweep-run {
+  position: absolute;
+  width: 88px;
+  height: 1.5px;
+  offset-distance: 0%;
+  background-image:
+    radial-gradient(circle at 100% 50%, var(--ch) 0 1.5px, transparent 3px),
+    linear-gradient(90deg, transparent 0%, var(--c) 34%, var(--ch) 92%, transparent 100%);
+  border-radius: 1px;
+  opacity: 0;
+  /* 光晕写死（不带动画）：每帧只改 offset-distance，不让浏览器每帧重新做一次滤镜光栅化 */
+  filter: drop-shadow(0 0 5px var(--ch));
+  animation-name: sweep-run;
+  animation-duration: var(--dur, 7s);
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+  animation-direction: var(--dir, normal);
+
+  /* 撞墙那一下的爆点：单独一颗光珠，只动 opacity/transform —— 纯合成，主线程零成本 */
+  &::after {
+    content: '';
+    position: absolute;
+    right: -4px;
+    top: 50%;
+    width: 10px;
+    height: 10px;
+    margin-top: -5px;
+    border-radius: 50%;
+    background: radial-gradient(closest-side, var(--ch) 0 22%, transparent 72%);
+    opacity: 0;
+    animation-name: sweep-hit;
+    animation-duration: var(--dur, 7s);
+    animation-timing-function: linear;
+    animation-iteration-count: infinite;
+    animation-direction: var(--dir, normal);
+  }
+}
+
+@keyframes sweep-run {
+  0% { offset-distance: 0%; opacity: 0; }
+  2.5% { opacity: 1; }
+  97.5% { opacity: 1; }
+  100% { offset-distance: 100%; opacity: 0; }
+}
+
+/* 四个拐角各爆一次；每次 2.5% 的窗口，短、亮 */
+@keyframes sweep-hit {
+  0% { opacity: 0; transform: scale(0.6); }
+  1.2% { opacity: 1; transform: scale(1.9); }
+  3.6% { opacity: 0; transform: scale(1); }
+  24% { opacity: 0; }
+  25% { opacity: 0; transform: scale(0.6); }
+  26.2% { opacity: 1; transform: scale(1.9); }
+  28.6% { opacity: 0; transform: scale(1); }
+  49% { opacity: 0; }
+  50% { opacity: 0; transform: scale(0.6); }
+  51.2% { opacity: 1; transform: scale(1.9); }
+  53.6% { opacity: 0; transform: scale(1); }
+  74% { opacity: 0; }
+  75% { opacity: 0; transform: scale(0.6); }
+  76.2% { opacity: 1; transform: scale(1.9); }
+  78.6% { opacity: 0; transform: scale(1); }
+  99% { opacity: 0; }
+  100% { opacity: 0; transform: scale(0.6); }
+}
+
+/* 跟班：两个人。前半圈死跟领头（落后 0 → 三条并成一股，三人行），
+   后半圈各自散开（A 拖到 4.8%、B 拖到 9%），圈末再收回来 —
+   所以每个大循环里，整整半个循环是三条对齐的。左 A 右 B 只差法线 ±7px。 */
+@utility sweep-trail {
+  position: absolute;
+  width: 62px;
+  height: 1px;
+  offset-distance: 0%;
+  background-image: linear-gradient(90deg, transparent 0%, var(--c) 46%, var(--ch) 94%, transparent 100%);
+  border-radius: 1px;
+  opacity: 0.8;
+  animation-name: var(--anim, sweep-trail-a);
+  animation-duration: var(--dur, 7s);
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+}
+
+/* A：前半圈落后 0，后半圈最多拖到 4.8% */
+@keyframes sweep-trail-a {
+  0% { offset-distance: 100%; }
+  50% { offset-distance: 50%; }
+  56.25% { offset-distance: 45.55%; }
+  62.5% { offset-distance: 41.1%; }
+  68.75% { offset-distance: 36.05%; }
+  75% { offset-distance: 29.8%; }
+  81.25% { offset-distance: 22.35%; }
+  87.5% { offset-distance: 14.3%; }
+  93.75% { offset-distance: 6.85%; }
+  100% { offset-distance: 0%; }
+}
+
+/* B：同样的节奏，但拖得更开，最多 9% */
+@keyframes sweep-trail-b {
+  0% { offset-distance: 100%; }
+  50% { offset-distance: 50%; }
+  56.25% { offset-distance: 47.15%; }
+  62.5% { offset-distance: 44.3%; }
+  68.75% { offset-distance: 40.25%; }
+  75% { offset-distance: 34%; }
+  81.25% { offset-distance: 25.55%; }
+  87.5% { offset-distance: 15.9%; }
+  93.75% { offset-distance: 7.35%; }
+  100% { offset-distance: 0%; }
+}
+
+
+
+/* ── dock / 覆盖卡片 ─────────────────────────────── */
+/* 边缘那条细线的呼吸光：有它在，说明 AI 正在动 */
+@keyframes dock-breathe {
+  0%, 100% { opacity: 0.28; }
+  50% { opacity: 0.9; }
+}
+.dock-breathe {
+  animation: dock-breathe 2.8s ease-in-out infinite;
+}
+
+/* 当前文件图标外圈的环：慢速扩散，和细线错开相位 */
+@keyframes dock-ring {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--brand) 45%, transparent); }
+  70% { box-shadow: 0 0 0 7px color-mix(in srgb, var(--brand) 0%, transparent); }
+  100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--brand) 0%, transparent); }
+}
+.dock-ring {
+  animation: dock-ring 2.4s ease-out infinite;
+  pointer-events: none;
+}
+
+/* 正在改的那一段：从上往下扫一遍 */
+@keyframes scan-sweep {
+  0% { transform: translateY(-110%); }
+  100% { transform: translateY(210%); }
+}
+.scan-sweep {
+  pointer-events: none;
+  background: linear-gradient(
+    180deg,
+    transparent 0%,
+    color-mix(in srgb, var(--brand) 22%, transparent) 45%,
+    transparent 100%
+  );
+  animation: scan-sweep 2.6s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dock-breathe, .dock-ring, .scan-sweep { animation: none; }
+}
+
+/* 卡片默认落点：桌面端居中偏左，让开右边那条 dock；手机上纯居中 */
+.doc-card-anchor {
+  transform: translateX(-50%);
+}
+@media (min-width: 768px) {
+  .doc-card-anchor {
+    transform: translateX(calc(-50% - 28px));
+  }
+}

@@ -1,0 +1,45 @@
+@import 'tailwindcss';
+@import './theme/tokens.css';
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+/* 手机浏览器地址栏收放会让 100% 跳动，dvh 才是真实可视高度 */
+@supports (height: 100dvh) {
+  #root {
+    height: 100dvh;
+  }
+}
+
+/* 横竖屏切换时不放大正文 */
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  /* 兜底：装饰层（极光/毛玻璃）永不给页面带来横向滚动 */
+  overflow-x: clip;
+}
+
+/* 尊重系统设置：不想看动效的人，一条都不放 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* 滚动条：不抢眼，只在需要时可见 */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}

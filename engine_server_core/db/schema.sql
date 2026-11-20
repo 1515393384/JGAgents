@@ -1,0 +1,1 @@
+-- SQLite 表结构。可移植子集：INTEGER / TEXT / BLOB / 整数毫秒。表待定：users / msgs / ledger / schema_ver

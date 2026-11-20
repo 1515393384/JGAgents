@@ -1,0 +1,16 @@
+# 依赖与产物
+node_modules/
+dist/
+.vite/
+target/
+
+# 日志与临时
+*.log
+dev.log
+*.tmp
+.env
+.env.*
+
+# 系统
+.DS_Store
+Thumbs.db
