@@ -1,0 +1,26 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"name": "Seekfree_CH32V307VCT6_Opensource_Library",
+			"path": "c:\\Users\\gaoph\\Documents\\xwechat_files\\wxid_zbb2qijtkjms22_6770\\msg\\attach\\e43e6f18bbde1a66c649e9616709abce\\2026-11\\Rec\\f86b863b189509cc\\F\\0\\project2\\project\\mrs"
+		}
+	],
+	"settings": {
+		"mrs.workspace.type": "project",
+		"files.associations": {
+			"*.c": "c",
+			"*.h": "cpp",
+			"*.hxx": "cpp",
+			"*.hpp": "cpp",
+			"*.c++": "cpp",
+			"*.cpp": "cpp",
+			"*.cxx": "cpp",
+			"*.cc": "cpp",
+			"*.hh": "cpp",
+			"*.h++": "cpp"
+		}
+	}
+}
