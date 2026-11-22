@@ -2,7 +2,10 @@ use std::fmt;
 
 use crate::core::error::EngineError;
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(transparent)]
 pub struct UserId(String);
 
 impl UserId {

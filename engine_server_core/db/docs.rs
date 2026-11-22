@@ -804,13 +804,14 @@ mod tests {
             let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
             zw.start_file("word/document.xml", opts).unwrap();
             zw.write_all(
-                br#"<?xml version="1.0" encoding="UTF-8"?>
+                r#"<?xml version="1.0" encoding="UTF-8"?>
 <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
   <w:body>
     <w:p><w:r><w:t>第三章 运维服务方案</w:t></w:r></w:p>
     <w:p><w:r><w:t>★ 一般故障 30 分钟内响应、2 小时内恢复，详见表 2-3。</w:t></w:r></w:p>
   </w:body>
-</w:document>"#,
+</w:document>"#
+                    .as_bytes(),
             )
             .unwrap();
             zw.finish().unwrap();

@@ -385,19 +385,8 @@ fn parse_document_xml(
             Event::Text(ref e) => {
                 if in_body && fallback_depth == 0 && del_depth == 0 && in_text_elem {
                     if let Some(ref mut p) = cur_para {
-                        if let Ok(decoded) = e.decode() {
+                        if let Ok(decoded) = e.unescape() {
                             p.text.push_str(&decoded);
-                        }
-                    }
-                }
-            }
-            Event::GeneralRef(ref g) => {
-                if in_body && fallback_depth == 0 && del_depth == 0 && in_text_elem {
-                    if let Some(ref mut p) = cur_para {
-                        if let Ok(entity) = g.decode() {
-                            if let Some(resolved) = resolve_xml_entity(&entity) {
-                                p.text.push_str(&resolved);
-                            }
                         }
                     }
                 }
