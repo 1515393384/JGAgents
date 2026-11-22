@@ -972,6 +972,48 @@ impl DocStore for SqliteDocStore {
             .ok_or_else(|| EngineError::not_found("该版本暂无渲染数据"))
         })
     }
+
+    fn get_doc_media(
+        &self,
+        doc_id: &str,
+        owner_id: &UserId,
+        rev: Option<i64>,
+        path: &str,
+    ) -> Result<Option<crate::doc::media::MediaEntry>, EngineError> {
+        // 先做路径前置校验，非法路径不必进库
+        crate::doc::media::normalize_media_path(path)?;
+
+        self.pool.with_reader(|conn| {
+            let (owner_raw, cur_rev): (String, i64) = conn
+                .query_row(
+                    "SELECT owner_user_id, current_rev FROM docs WHERE id = ?1",
+                    [doc_id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()
+                .map_err(|e| map_sqlite_err(e, "query doc for media"))?
+                .ok_or_else(|| EngineError::not_found("文档不存在"))?;
+
+            if owner_raw != owner_id.as_str() {
+                return Err(EngineError::forbidden("无权查看该文档"));
+            }
+
+            let target_rev = rev.unwrap_or(cur_rev);
+            let blob: Option<Vec<u8>> = conn
+                .query_row(
+                    "SELECT docx_blob FROM doc_revisions WHERE doc_id = ?1 AND rev = ?2",
+                    rusqlite::params![doc_id, target_rev],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(|e| map_sqlite_err(e, "query docx blob for media"))?;
+
+            let Some(blob) = blob else {
+                return Ok(None);
+            };
+            crate::doc::media::read_media(&blob, path)
+        })
+    }
 }
 
 #[cfg(test)]

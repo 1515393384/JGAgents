@@ -96,6 +96,18 @@ impl Default for RunFmt {
 pub struct RunSpan {
     pub text: String,
     pub fmt: RunFmt,
+    /// 图片 run：`text` 为空，前端按 `path` 走媒体接口取图
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub image: Option<ImageRef>,
+}
+
+/// 正文里的一张图。`path` 是 docx 包内路径，尺寸为 0 表示原图尺寸。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageRef {
+    pub path: String,
+    pub width_px: u32,
+    pub height_px: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -418,7 +430,10 @@ pub fn parse_rendered_doc(docx: &[u8]) -> Result<RenderedDoc, EngineError> {
         .map(parse_styles)
         .unwrap_or_default();
 
-    let mut walker = Walker::new(&sheet);
+    // 图片关系表：拿不到就空表，正文照常渲染（图不显示）
+    let rels = crate::doc::media::load_document_rels(docx);
+
+    let mut walker = Walker::new(&sheet, &rels);
     walker.run(&doc_bytes)?;
     Ok(walker.finish())
 }
@@ -705,6 +720,14 @@ fn normalize_align(raw: &str) -> String {
     .to_string()
 }
 
+/// EMU -> CSS px（1px = 9525 EMU）
+fn emu_to_px(emu: i64) -> u32 {
+    if emu <= 0 {
+        return 0;
+    }
+    (emu as f64 / 9525.0).round() as u32
+}
+
 fn normalize_line_rule(raw: &str) -> String {
     match raw.trim().to_ascii_lowercase().as_str() {
         "exact" => "exact",
@@ -729,6 +752,8 @@ fn attr_val(e: &BytesStart<'_>, target_local: &[u8]) -> Option<String> {
 
 struct Walker<'a> {
     sheet: &'a StyleSheet,
+    /// rId -> 包内图片路径
+    rels: &'a HashMap<String, String>,
     page: PageSetup,
     blocks: Vec<RenderBlock>,
     para_count: usize,
@@ -757,6 +782,10 @@ struct Walker<'a> {
     in_text: bool,
     /// 段内出现 `<w:br w:type="page"/>`，flush 时补一个 page_break 块
     pending_page_break: bool,
+    /// drawing / pict 深度；>0 时正文解析暂停
+    drawing_depth: usize,
+    /// 正在收的图：(rId, 宽 px, 高 px)
+    cur_image: Option<(String, u32, u32)>,
 }
 
 struct ParaBuilder {
@@ -775,9 +804,10 @@ struct TableBuilder {
 }
 
 impl<'a> Walker<'a> {
-    fn new(sheet: &'a StyleSheet) -> Self {
+    fn new(sheet: &'a StyleSheet, rels: &'a HashMap<String, String>) -> Self {
         Self {
             sheet,
+            rels,
             page: PageSetup::default(),
             blocks: Vec::new(),
             para_count: 0,
@@ -802,6 +832,8 @@ impl<'a> Walker<'a> {
             fallback_depth: 0,
             in_text: false,
             pending_page_break: false,
+            drawing_depth: 0,
+            cur_image: None,
         }
     }
 
@@ -854,6 +886,11 @@ impl<'a> Walker<'a> {
             return;
         }
 
+        // 图片：drawing / pict 子树整体接管，不参与正文解析
+        if self.on_image_tag(local, e) {
+            return;
+        }
+
         // 表格级对齐：<w:tblPr><w:jc w:val="center"/></w:tblPr>
         if local == b"jc" && self.tblpr_depth > 0 {
             if let Some(ref mut t) = self.cur_table {
@@ -888,6 +925,7 @@ impl<'a> Walker<'a> {
                 self.cur_run = Some(RunSpan {
                     text: String::new(),
                     fmt: RunFmt::default(),
+                    image: None,
                 });
             }
             b"t" if self.r_depth > 0 => {
@@ -1081,6 +1119,59 @@ impl<'a> Walker<'a> {
         }
     }
 
+    /// 图片相关标签统一入口。返回 true 表示已消费，正文解析跳过该标签。
+    fn on_image_tag(&mut self, local: &[u8], e: &BytesStart<'_>) -> bool {
+        if local == b"drawing" || local == b"pict" {
+            self.drawing_depth += 1;
+            self.cur_image = None;
+            return true;
+        }
+        if self.drawing_depth == 0 {
+            return false;
+        }
+        match local {
+            b"extent" => {
+                let cx = attr_val(e, b"cx").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
+                let cy = attr_val(e, b"cy").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
+                let rel = self.cur_image.take().map(|(r, _, _)| r).unwrap_or_default();
+                let (w, h) = if cx > 0 && cy > 0 {
+                    (emu_to_px(cx), emu_to_px(cy))
+                } else {
+                    (0, 0)
+                };
+                self.cur_image = Some((rel, w, h));
+            }
+            b"blip" | b"imagedata" => {
+                let mut rid = String::new();
+                for attr in e.attributes().flatten() {
+                    let k = attr.key.local_name();
+                    let k = k.as_ref();
+                    if k == b"embed" || k == b"id" {
+                        rid = attr.unescape_value().unwrap_or_default().to_string();
+                        break;
+                    }
+                }
+                if !rid.is_empty() {
+                    let (_, w, h) = self.cur_image.take().unwrap_or_default();
+                    self.cur_image = Some((rid, w, h));
+                }
+            }
+            _ => {}
+        }
+        true
+    }
+
+    /// 把已收齐的 (rId, 尺寸) 换成可直出的图片引用；关系表里找不到就丢弃。
+    fn take_image(&mut self) -> Option<ImageRef> {
+        let (rid, w, h) = self.cur_image.take()?;
+        let path = self.rels.get(&rid)?.clone();
+        Some(ImageRef {
+            path,
+            width_px: w,
+            height_px: h,
+        })
+    }
+
     fn on_empty(&mut self, e: &BytesStart<'_>) {
         let name = e.local_name();
         let local = name.as_ref();
@@ -1097,6 +1188,11 @@ impl<'a> Walker<'a> {
             return;
         }
 
+        // 图片：extent / blip / imagedata 多是 Empty 形态
+        if self.on_image_tag(local, e) {
+            return;
+        }
+
         // 表格级对齐（Empty 形态）
         if local == b"jc" && self.tblpr_depth > 0 {
             if let Some(ref mut t) = self.cur_table {
@@ -1105,7 +1201,8 @@ impl<'a> Walker<'a> {
             return;
         }
         // pStyle 只会以 Empty 形态出现，且它不在 ParaPatch 里，单独取
-        if local == b"pStyle" && self.ppr_depth > 0 {            if let Some(ref mut p) = self.cur_para {
+        if local == b"pStyle" && self.ppr_depth > 0 {
+            if let Some(ref mut p) = self.cur_para {
                 if let Some(v) = attr_val(e, b"val") {
                     p.style_id = v;
                 }
@@ -1137,7 +1234,8 @@ impl<'a> Walker<'a> {
     }
 
     fn on_text(&mut self, e: &quick_xml::events::BytesText<'_>) {
-        if !self.in_body || self.fallback_depth > 0 || self.del_depth > 0 {
+        if !self.in_body || self.fallback_depth > 0 || self.del_depth > 0 || self.drawing_depth > 0
+        {
             return;
         }
         if !self.in_text {
@@ -1169,6 +1267,19 @@ impl<'a> Walker<'a> {
             self.del_depth = self.del_depth.saturating_sub(1);
             return;
         }
+        if local == b"drawing" || local == b"pict" {
+            self.drawing_depth = self.drawing_depth.saturating_sub(1);
+            if self.drawing_depth == 0 {
+                if let Some(img) = self.take_image() {
+                    if let Some(ref mut run) = self.cur_run {
+                        if run.image.is_none() {
+                            run.image = Some(img);
+                        }
+                    }
+                }
+            }
+            return;
+        }
 
         match local {
             b"t" => self.in_text = false,
@@ -1185,7 +1296,7 @@ impl<'a> Walker<'a> {
                 self.r_depth = self.r_depth.saturating_sub(1);
                 if let Some(span) = self.cur_run.take() {
                     if let Some(ref mut p) = self.cur_para {
-                        if !span.text.is_empty() {
+                        if !span.text.is_empty() || span.image.is_some() {
                             p.runs.push(span);
                         }
                     }
@@ -1291,12 +1402,14 @@ impl<'a> Walker<'a> {
         let mut runs: Vec<RunSpan> = Vec::with_capacity(para.runs.len());
         for span in para.runs {
             let raw = span.text;
+            let image = span.image;
             // run 的直接格式已在收集阶段写进 span.fmt（以默认值起步），
             // 这里再与段落基准做一次合并：段落基准优先补空缺，已有值保留。
             let merged_fmt = merge_run(&base_run, &span.fmt);
             runs.push(RunSpan {
                 text: raw,
                 fmt: merged_fmt,
+                image,
             });
         }
 
@@ -1670,6 +1783,88 @@ mod tests {
             zw.finish().unwrap();
         }
         cursor.into_inner()
+    }
+
+    const RELS_XML: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image1.png"/>
+</Relationships>"#;
+
+    fn zipped_with_media(document: &str, styles: &str) -> Vec<u8> {
+        use std::io::{Cursor, Write};
+
+        use zip::write::SimpleFileOptions;
+        use zip::{CompressionMethod, ZipWriter};
+
+        let mut cursor = Cursor::new(Vec::new());
+        {
+            let mut zw = ZipWriter::new(&mut cursor);
+            let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+            zw.start_file("word/document.xml", opts).unwrap();
+            zw.write_all(document.as_bytes()).unwrap();
+            zw.start_file("word/styles.xml", opts).unwrap();
+            zw.write_all(styles.as_bytes()).unwrap();
+            zw.start_file("word/_rels/document.xml.rels", opts).unwrap();
+            zw.write_all(RELS_XML.as_bytes()).unwrap();
+            zw.start_file("word/media/image1.png", opts).unwrap();
+            zw.write_all(b"\x89PNG fake").unwrap();
+            zw.finish().unwrap();
+        }
+        cursor.into_inner()
+    }
+
+    #[test]
+    fn drawing_run_becomes_image_ref_with_emu_size() {
+        let document = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+            xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:body>
+    <w:p><w:r><w:t>图前</w:t></w:r></w:p>
+    <w:p><w:r><w:drawing>
+      <wp:inline><wp:extent cx="952500" cy="476250"/>
+        <a:graphic><a:graphicData><a:blip r:embed="rId5"/></a:graphicData></a:graphic>
+      </wp:inline>
+    </w:drawing></w:r></w:p>
+    <w:p><w:r><w:t>图后</w:t></w:r></w:p>
+  </w:body>
+</w:document>"#;
+
+        let doc = parse_rendered_doc(&zipped_with_media(document, "")).expect("parse");
+        assert_eq!(doc.blocks.len(), 3, "图片段落不应被吞掉");
+        let p = doc.blocks[1].para.as_ref().expect("图片段落");
+        let img = p.runs[0].image.as_ref().expect("应解析出图片");
+        assert_eq!(img.path, "word/media/image1.png");
+        assert_eq!((img.width_px, img.height_px), (100, 50), "EMU 换算成 px");
+        assert_eq!(p.runs[0].text, "");
+        let after = doc.blocks[2].para.as_ref().expect("图后段落");
+        assert_eq!(after.runs[0].text, "图后");
+    }
+
+    #[test]
+    fn drawing_without_rels_is_dropped_silently() {
+        let document = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+            xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:body>
+    <w:p><w:r><w:drawing><wp:inline><a:blip r:embed="rIdX"/></wp:inline></w:drawing></w:r></w:p>
+    <w:p><w:r><w:t>后文</w:t></w:r></w:p>
+  </w:body>
+</w:document>"#;
+
+        let doc = parse_rendered_doc(&zipped(document, "")).expect("parse");
+        assert!(
+            doc.blocks.iter().all(|b| b
+                .para
+                .as_ref()
+                .map(|p| p.runs.iter().all(|r| r.image.is_none()))
+                .unwrap_or(true)),
+            "关系表缺失时不应产出图片 run"
+        );
+        assert_eq!(doc.blocks.last().unwrap().para.as_ref().unwrap().runs[0].text, "后文");
     }
 
     const STYLES_XML: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>

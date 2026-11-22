@@ -129,9 +129,18 @@ export type RunFmt = {
   highlight: string
 }
 
+export type ImageRef = {
+  /** docx 包内路径，如 word/media/image1.png */
+  path: string
+  /** 0 表示按原图尺寸 */
+  widthPx: number
+  heightPx: number
+}
+
 export type RunSpan = {
   text: string
   fmt: RunFmt
+  image?: ImageRef
 }
 
 export type ParaFmt = {
@@ -1429,6 +1438,15 @@ export async function fetchDocRender(
     `/api/docs/${encodeURIComponent(docId)}/render${q ? `?${q}` : ''}`,
     { method: 'GET' },
   )
+}
+
+/**
+ * 正文图片直出地址：图片从该版本 docx 归档里按需取，前端只当普通 <img> 用。
+ */
+export function docMediaUrl(docId: string, path: string, rev?: number): string {
+  const qs = new URLSearchParams({ path })
+  if (rev !== undefined) qs.set('rev', String(rev))
+  return `/api/docs/${encodeURIComponent(docId)}/media?${qs.toString()}`
 }
 
 export async function fetchDocDiff(

@@ -16,6 +16,7 @@ import {
 import { MicroWindow } from '../../components/micro-window'
 import {
   DocClientError,
+  docMediaUrl,
   downloadDocRevision,
   fetchDocDiff,
   fetchDocRender,
@@ -415,6 +416,10 @@ export function DocCard({
     registerRef: (anchor, el) => {
       nodeRefs.current[anchor] = el
     },
+    mediaUrl: (path) => {
+      const id = detail?.doc.id
+      return id ? docMediaUrl(id, path, detail?.doc.currentRev) : ''
+    },
   }
 
   return (
@@ -640,7 +645,11 @@ export function DocCard({
             </button>
           </div>
         ) : (
-          <div className="mx-auto max-w-[680px] rounded-field bg-surface px-5 py-6 shadow-card md:px-8 md:py-7">
+          <div
+            className={`mx-auto rounded-field bg-surface px-5 py-6 shadow-card md:px-8 md:py-7 ${
+              tab === 'outline' ? 'max-w-[680px]' : 'max-w-[1240px]'
+            }`}
+          >
             {/* FTS5 检索结果条 */}
             {searchHits !== null && tab === 'body' ? (
               <div className="mb-5 border-b border-surface-border pb-4">
@@ -693,12 +702,17 @@ export function DocCard({
 
             {/* 视图 1：正文页 —— 版式渲染，人看的唯一视图 */}
             {tab === 'body' ? (
-              <DocBody
-                slice={render}
-                loading={renderLoading}
-                missing={renderMissing}
-                ctx={blockCtx}
-              />
+              <div className="flex items-start gap-4">
+                <DocOutline blocks={render?.blocks ?? []} onJump={jumpToAnchor} />
+                <div className="min-w-0 flex-1 overflow-x-auto">
+                  <DocBody
+                    slice={render}
+                    loading={renderLoading}
+                    missing={renderMissing}
+                    ctx={blockCtx}
+                  />
+                </div>
+              </div>
             ) : null}
 
             {/* 视图 2：目录与硬约束 */}
@@ -951,7 +965,9 @@ export function DocCard({
 // ── 版式渲染（人类视图）─────────────────────────────────────────────────────
 // 只吃后端 render 切片：纸面尺寸/边距来自 sectPr，字样来自样式继承链展开后的确定值。
 
-const TWIPS_PER_PX = 20
+// twips 是 1/20 pt，浏览器按 96dpi 排版，所以 twips → px 是 /(20*72/96) = /15。
+// 之前按 /20 算相当于当成 pt 用，整页比真实 A4 窄四分之一。
+const TWIPS_PER_PX = 15
 
 function px(twipsValue: number | undefined | null): number | undefined {
   if (!twipsValue || twipsValue <= 0) return undefined
@@ -1008,9 +1024,9 @@ function runStyle(fmt: RunFmt): React.CSSProperties {
   }
 }
 
-function DocPara({ para }: { para: RPara }) {
+function DocPara({ para, ctx }: { para: RPara; ctx: BlockCtx }) {
   const fmt = para.fmt
-  const hasText = para.runs.some((r) => r.text.length > 0)
+  const hasContent = para.runs.some((r) => r.text.length > 0 || r.image)
   const style: React.CSSProperties = {
     marginTop: px(fmt.spaceBeforeTwips),
     marginBottom: px(fmt.spaceAfterTwips),
@@ -1023,22 +1039,36 @@ function DocPara({ para }: { para: RPara }) {
     overflowWrap: 'anywhere',
   }
 
-  if (!hasText) {
+  if (!hasContent) {
     return <p style={style} className="min-h-[1em]" />
   }
 
   return (
     <p style={style}>
-      {para.runs.map((run, idx) => (
-        <span key={idx} style={runStyle(run.fmt)}>
-          {run.text}
-        </span>
-      ))}
+      {para.runs.map((run, idx) =>
+        run.image ? (
+          <img
+            key={idx}
+            src={ctx.mediaUrl(run.image.path)}
+            alt=""
+            loading="lazy"
+            className="inline-block max-w-full align-bottom"
+            style={{
+              width: run.image.widthPx > 0 ? run.image.widthPx : undefined,
+              height: run.image.heightPx > 0 ? run.image.heightPx : undefined,
+            }}
+          />
+        ) : (
+          <span key={idx} style={runStyle(run.fmt)}>
+            {run.text}
+          </span>
+        ),
+      )}
     </p>
   )
 }
 
-function DocTable({ table }: { table: RTable }) {
+function DocTable({ table, ctx }: { table: RTable; ctx: BlockCtx }) {
   const gridSum = table.grid.reduce((a, b) => a + (b > 0 ? b : 0), 0)
   const totalTwips = table.widthTwips > 0 ? table.widthTwips : gridSum
 
@@ -1064,7 +1094,7 @@ function DocTable({ table }: { table: RTable }) {
                   {cell.paras.length === 0 ? (
                     <p className="min-h-[1em]" />
                   ) : (
-                    cell.paras.map((p, pIdx) => <DocPara key={pIdx} para={p} />)
+                    cell.paras.map((p, pIdx) => <DocPara key={pIdx} para={p} ctx={ctx} />)
                   )}
                 </td>
               ))}
@@ -1090,6 +1120,60 @@ type BlockCtx = {
   onCommitEdit: (node: DocNodeRecord) => void
   onToggleLock: (node: DocNodeRecord) => void
   registerRef: (anchor: string, el: HTMLDivElement | null) => void
+  mediaUrl: (path: string) => string
+}
+
+/** 正文左侧章节导航：取版式里带级次的标题块，点击滚到对应段落。 */
+function DocOutline({
+  blocks,
+  onJump,
+}: {
+  blocks: RenderBlock[]
+  onJump: (anchorId: string) => void
+}) {
+  const entries = useMemo(() => {
+    const items: { anchor: string; level: number; text: string }[] = []
+    for (const b of blocks) {
+      if (b.kind !== 'para' || b.headingLevel <= 0 || !b.para) continue
+      const text = b.para.runs.map((r) => r.text).join('').trim()
+      if (!text) continue
+      items.push({ anchor: b.anchor, level: b.headingLevel, text })
+    }
+    const base = items.reduce((m, it) => Math.min(m, it.level), items[0]?.level ?? 1)
+    return items.map((it) => ({ ...it, level: it.level - base }))
+  }, [blocks])
+
+  if (entries.length === 0) {
+    return (
+      <aside className="hidden w-[190px] shrink-0 md:block">
+        <div className="sticky top-2 text-[11px] text-fg-subtle">无标题级目录</div>
+      </aside>
+    )
+  }
+
+  return (
+    <aside className="hidden w-[190px] shrink-0 md:block">
+      <div className="sticky top-2 max-h-[72vh] overflow-y-auto pr-1">
+        <div className="mb-1.5 text-[11px] font-medium text-fg-subtle">
+          目录 · {entries.length} 节
+        </div>
+        <div className="space-y-0.5">
+          {entries.map((it) => (
+            <button
+              key={it.anchor}
+              type="button"
+              onClick={() => onJump(it.anchor)}
+              title={it.text}
+              className="block w-full truncate rounded-[5px] py-1 pr-1.5 text-left text-[12px] leading-5 text-fg-muted transition-colors hover:bg-surface-sunken hover:text-fg"
+              style={{ paddingLeft: 6 + it.level * 12 }}
+            >
+              {it.text}
+            </button>
+          ))}
+        </div>
+      </div>
+    </aside>
+  )
 }
 
 function DocBody({
@@ -1203,9 +1287,9 @@ function DocBlock({ block, ctx }: { block: RenderBlock; ctx: BlockCtx }) {
       ) : null}
 
       {block.kind === 'table' && block.table ? (
-        <DocTable table={block.table} />
+        <DocTable table={block.table} ctx={ctx} />
       ) : block.para ? (
-        <DocPara para={block.para} />
+        <DocPara para={block.para} ctx={ctx} />
       ) : null}
 
       {editing && node ? (

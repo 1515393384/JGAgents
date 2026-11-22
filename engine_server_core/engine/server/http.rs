@@ -457,6 +457,7 @@ where
         )
         .route("/{id}/search", get(search_doc::<U, S, D, V, L, H, C>))
         .route("/{id}/render", get(render_doc_slice::<U, S, D, V, L, H, C>))
+        .route("/{id}/media", get(doc_media::<U, S, D, V, L, H, C>))
         .route("/{id}/diff", get(diff_doc::<U, S, D, V, L, H, C>))
         .route("/{id}/patch", post(patch_doc::<U, S, D, V, L, H, C>))
         .route(
@@ -1023,6 +1024,46 @@ where
         run_blocking(move || docs_store.get_render_slice(&doc_id, &user.id, q.rev, q.from, q.to))
             .await?;
     Ok(Json(slice))
+}
+
+#[derive(Deserialize)]
+struct DocMediaQuery {
+    /// 包内路径，如 `word/media/image1.png`
+    path: String,
+    rev: Option<i64>,
+}
+
+/// 正文里的图片：直接从该版本 docx 归档里取，不额外存副本。
+async fn doc_media<U, S, D, V, L, H, C>(
+    State(state): State<AppState<U, S, D, V, L, H, C>>,
+    Extension(user): Extension<UserRecord>,
+    Path(doc_id): Path<String>,
+    Query(q): Query<DocMediaQuery>,
+) -> Result<Response, ApiError>
+where
+    U: UserStore + 'static,
+    S: SessionStore + 'static,
+    D: DocStore + 'static,
+    V: ConvStore + 'static,
+    L: LedgerStore + 'static,
+    H: HealthProbe + 'static,
+    C: Clock + 'static,
+{
+    let docs_store = Arc::clone(&state.docs);
+    let entry = run_blocking(move || docs_store.get_doc_media(&doc_id, &user.id, q.rev, &q.path))
+        .await?
+        .ok_or_else(|| EngineError::not_found("图片不存在"))?;
+
+    let mut headers = HeaderMap::new();
+    if let Ok(value) = HeaderValue::from_str(entry.mime) {
+        headers.insert(header::CONTENT_TYPE, value);
+    }
+    // 归档不可变：同一 rev 的图不会变，浏览器可长期缓存
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, max-age=86400, immutable"),
+    );
+    Ok((StatusCode::OK, headers, entry.bytes).into_response())
 }
 
 async fn lock_doc_node<U, S, D, V, L, H, C>(

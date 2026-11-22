@@ -146,6 +146,14 @@ pub trait DocStore: Send + Sync {
         from_seq: Option<usize>,
         to_seq: Option<usize>,
     ) -> Result<crate::doc::render::RenderSlice, EngineError>;
+    /// 取某版本 docx 包内的图片。`rev` 缺省取当前版本。
+    fn get_doc_media(
+        &self,
+        doc_id: &str,
+        owner_id: &UserId,
+        rev: Option<i64>,
+        path: &str,
+    ) -> Result<Option<crate::doc::media::MediaEntry>, EngineError>;
 }
 
 pub trait ConvStore: Send + Sync {
