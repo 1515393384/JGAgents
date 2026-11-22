@@ -542,6 +542,16 @@ fn apply_style_event(
                 scope.push(Scope::ParaProps);
             }
         }
+        // <w:style><w:name w:val="heading 1"/>：WPS/Word 常把 styleId 写成 "1"，级次只在 name 里
+        b"name" if cur_id.is_some() && scope.last() == Some(&Scope::Style) => {
+            if cur_def.para.heading_level.is_none() {
+                if let Some(v) = attr_val(e, b"val") {
+                    if let Some(lvl) = heading_from_name(&v) {
+                        cur_def.para.heading_level = Some(lvl);
+                    }
+                }
+            }
+        }
         b"rPr" => {
             if is_start {
                 scope.push(Scope::RunProps);
@@ -1660,6 +1670,22 @@ fn merge_run(base: &RunFmt, run: &RunFmt) -> RunFmt {
     }
 }
 
+/// 样式显示名 → 标题级次。`heading 1` / `Heading1` / `标题 1` 都算。
+fn heading_from_name(name: &str) -> Option<u8> {
+    let lower = name.trim().to_ascii_lowercase();
+    if !(lower.starts_with("heading") || lower.starts_with("标题")) {
+        return None;
+    }
+    let digits: String = lower.chars().filter(|c| c.is_ascii_digit()).collect();
+    if digits.len() != 1 {
+        return None;
+    }
+    digits
+        .parse::<u8>()
+        .ok()
+        .filter(|n| (1..=6).contains(n))
+}
+
 fn heading_from_style(style_id: &str) -> Option<u8> {
     let id = style_id.trim().to_ascii_lowercase();
     if id.is_empty() {
@@ -1914,6 +1940,30 @@ mod tests {
         assert_eq!(body.heading_level, 0);
         assert!(bp.runs[0].fmt.bold, "run 直接格式的 bold");
         assert!(!bp.runs[1].fmt.bold, "同段第二个 run 不应被带 bold");
+    }
+
+    #[test]
+    fn heading_level_from_style_name_when_style_id_is_numeric() {
+        // WPS 常见：styleId="1"，级次只写在 <w:name w:val="heading 1"/>
+        let styles = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:style w:type="paragraph" w:styleId="1"><w:name w:val="heading 1"/></w:style>
+  <w:style w:type="paragraph" w:styleId="2"><w:name w:val="heading 2"/></w:style>
+  <w:style w:type="paragraph" w:styleId="a"><w:name w:val="Normal"/></w:style>
+</w:styles>"#;
+        let document = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:p><w:pPr><w:pStyle w:val="1"/></w:pPr><w:r><w:t>第一章</w:t></w:r></w:p>
+    <w:p><w:pPr><w:pStyle w:val="2"/></w:pPr><w:r><w:t>第一节</w:t></w:r></w:p>
+    <w:p><w:pPr><w:pStyle w:val="a"/></w:pPr><w:r><w:t>正文</w:t></w:r></w:p>
+  </w:body>
+</w:document>"#;
+
+        let doc = parse_rendered_doc(&zipped(document, styles)).expect("parse");
+        assert_eq!(doc.blocks[0].heading_level, 1);
+        assert_eq!(doc.blocks[1].heading_level, 2);
+        assert_eq!(doc.blocks[2].heading_level, 0, "Normal 不应被判成标题");
     }
 
     #[test]
