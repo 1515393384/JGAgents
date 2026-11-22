@@ -27,3 +27,6 @@ Thumbs.db
 
 # 外部参考仓库（只读，不入库）
 .ref/
+
+# temp 备份目录只留一份（temp/project），bak 不入库
+temp/*_bak/
