@@ -34,20 +34,27 @@
  ********************************************************************************************************************/
 
 /*
+ * 场地实测结构（重要，决定判据）：
+ *   整场铺蓝色垫子；赛道是贴在蓝垫上的白色宽带，宽 45.5cm。
+ *   白带两侧【没有黑线】，白 -> 蓝 直接过渡。
+ *   蓝区里的黑线是垫子接缝；白带表面本身也有横向拼缝、胶带、脏痕。
+ *   => 灰度上：白带最亮，蓝垫中等偏暗，接缝/胶带很暗。
+ *   => 所以“暗”既可能是赛道外，也可能是白带上的脏点，必须区分。
+ *
  * 主循环 main step（while 1 内顺序执行）：
  * step 1 检测入口：等摄像头新帧；100ms 无帧按丢线停车
- * step 2 二值化：近场 ROI 大津阈值 + 近场白占比校验（远端背景不再把阈值带跑）
- * step 3 找线：抗板缝种子列 -> 远近逐行跟踪 -> 单边弯道外推 -> 加权中心
- * step 4 闭环控制：归一化 PD（不随像素尺度提前饱和）+ 弯道自减速 + 丢线保持
+ * step 2 二值化：近场 ROI 大津阈值 + 近场白占比校验
+ * step 3 找线：近场基准行实测道宽 -> 透视缩放 -> 逐行带连续性约束跟踪
+ * step 4 闭环控制：按实测半宽归一化 PD + 弯道自减速 + 丢线保持
  * step 5 状态显示：每 10 帧刷新 TFT 遥测
  *
- * 关键修正（对应实测“抽搐 / 一直 LOST 闪烁 / 反打 / 弯道更剧烈”）：
- * 1 阈值只在近场统计，并改用近场白占比判有效 —— 弯道远场背景变化不再翻转整帧判定
- * 2 丢线不再立刻断电：连续丢线 6 帧内保持舵机 + 低占空比滑行，超过才停车 —— 消除“刹-冲”抽搐
- * 3 宽度超限的行只丢弃，不再计入十字 —— 宽度估计偏差不会把正常直道误判成十字而直冲
- * 4 转向量按半幅归一化 —— 极值误差才顶满舵，不再误差 50px 就打满
- * 5 微分项单独限幅 + 连续死区 —— 恢复帧不再出现 D 项阶跃冲击
- * 6 电机占空比斜坡 —— 停-走切换不再瞬间满占空比
+ * 本轮相对上一版的关键修正（对应实测“抽搐 / 一直 LOST 闪烁 / 反打 / 直线不走 / 弯道更剧烈”）：
+ * 1 边缘判定从“连续2个暗像素”提高到“连续3个暗像素”，白带上的拼缝/脏点/胶带不再被当成赛道边
+ * 2 新增逐行连续性约束：本行 l/r 与上一行相差超过 CONTINUITY_PX 就丢弃该行，不污染中心
+ * 3 赛道像素宽度改为“近场基准行实测”驱动，不再用写死的 62/32 先验 —— 装高、45.5cm 都能自适应
+ * 4 转向误差用实测半宽做分母，误差半个赛道宽才顶满舵
+ * 5 权重改为近场优先（车头正前方才是当前姿态），弯道不再提前打死
+ * 6 base_speed 1350 -> 3000：13.5% 占空比带不动这车重，直线“走两步停一下”
  */
 #include "zf_common_headfile.h"
 
@@ -61,43 +68,54 @@
 #define SERVO_DIR           1       // 舵机方向：若车偏左反而往左打，改成 -1
 #define MAX_SERVO_TURN      150     // 舵机最大打角限幅（防顶死悬架）
 
-#define KP_NORM             1.05f   // 归一化转向比例（1.0 = 满幅误差刚好打满舵）
-#define KD_NORM             0.28f   // 归一化转向阻尼
-#define D_TERM_LIMIT        0.35f   // 微分项最多占总打角的比例（防恢复帧冲击）
-#define ERROR_LPF_ALPHA     0.55f   // 误差低通滤波系数
-#define DEADBAND_PX         2.5f    // 中心小死区（像素），死区内线性收敛不留阶跃
+#define KP_NORM             1.00f   // 归一化转向比例（1.0 = 偏差半个赛道宽刚好打满舵）
+#define KD_NORM             0.22f   // 归一化转向阻尼
+#define D_TERM_LIMIT        0.30f   // 微分项最多占总打角的比例（防恢复帧冲击）
+#define ERROR_LPF_ALPHA     0.60f   // 误差低通滤波系数
+#define DEADBAND_PX         2.0f    // 中心小死区（像素），死区内线性收敛不留阶跃
 
-#define base_speed          1350    // 直道基础占空比（满分 10000）
-#define turn_min_speed      1050    // 急弯最低保底占空比（防弯道降速过多堵转）
-#define max_speed           2200    // 最大限速保护
-#define TURN_SLOW_GAIN      4.5f    // 弯道减速系数：误差越大适当减速
-#define SPEED_RAMP_STEP     90      // 电机占空比每帧最大变化量（消除停-走冲击）
+#define base_speed          3000    // 直道基础占空比（满分 10000）。13.5% 带不动车，起步用 30%
+#define turn_min_speed      2100    // 急弯最低保底占空比（防弯道降速堵转）
+#define max_speed           7000    // 最大限速保护
+#define TURN_SLOW_RATIO     0.30f   // 满舵时最多降速 30%
+#define SPEED_RAMP_STEP     200     // 电机占空比每帧最大变化量（消除停-走冲击）
 
-// ── 图像识别参数（适配 45.5cm 白底蓝垫跑道）────────────────────────────────────
-#define MIN_CONTRAST        12      // 近场前后景最小灰度差（放宽以兼容偏暗室内光）
-#define NEAR_WHITE_MIN_PCT  20      // 近场白板像素占比下限（%），低于此判为没看到赛道
-#define CROSS_ROWS_RATIO    0.55f   // 无边行占比超过该值判为十字
-#define CENTER_OK_RATIO     0.08f   // 屏幕显示 1111 居中的误差占比阈值
+// ── 图像识别参数（适配 45.5cm 白色赛道 + 蓝色垫子背景）──────────────────────────
+#define MIN_CONTRAST        12      // 近场前后景最小灰度差
+#define NEAR_WHITE_MIN_PCT  15      // 近场白占比下限（%）。45.5cm 白带近场约占 40~60%
+#define NEAR_SEG_MIN_W      30      // 近场基准行最少要找到多宽的白段才算“看到赛道”
+#define CROSS_ROWS_RATIO    0.55f   // 两侧全白到边界的行占比超过该值判为十字
+#define CENTER_OK_RATIO     0.10f   // 居中显示阈值（占半宽比例）
 #define FRAME_TIMEOUT_MS    100
-#define TFT_REFRESH_DIV     10      // 每 10 帧刷一次屏幕（首帧与状态切换时立即刷新）
-#define LOST_HOLD_FRAMES    6       // 连续丢线容忍帧数，之内保持舵机滑行
-#define LOST_CREEP_PCT      45      // 丢线滑行占基础速度的百分比
+#define TFT_REFRESH_DIV     10      // 每 10 帧刷一次屏幕
+#define LOST_HOLD_FRAMES    8       // 连续丢线容忍帧数，之内保持舵机滑行
+#define LOST_CREEP_PCT      55      // 丢线滑行占基础速度的百分比
 
-#define SCAN_BOT_ROW        (MT9V03X_H - 10)
-#define SCAN_TOP_ROW        40
+#define SCAN_BOT_ROW        (MT9V03X_H - 8)
+#define SCAN_TOP_ROW        44
 #define SCAN_STEP           3
 #define SCAN_ROWS           (((SCAN_BOT_ROW - SCAN_TOP_ROW) / SCAN_STEP) + 1)
 
-// 近场 ROI：视野下部，赛道一定在这里；远端背景（蓝垫/看台）不参与统计
+// 近场 ROI：视野下部，赛道一定在这里；远端背景不参与统计
 #define NEAR_ROI_TOP        (MT9V03X_H - 72)
 #define NEAR_ROI_BOT        (MT9V03X_H - 4)
 
 #define HALF_W              (0.5f * (float)MT9V03X_W)
 
+// 近场基准行（从上到下三条候选，取能找到的最宽合理白段）
+#define SENSE_ROW_0         (MT9V03X_H - 8)
+#define SENSE_ROW_1         (MT9V03X_H - 20)
+#define SENSE_ROW_2         (MT9V03X_H - 34)
+
+// 透视：近场半宽 -> 远端半宽的收缩比（越远越窄）
+#define PERSP_FAR_RATIO     0.60f
+
+// 逐行连续性：本行边界与上一行相差超过该像素数就丢弃该行
+#define CONTINUITY_PX       18
+
 volatile uint32_t g_tick_ms = 0;
 
 // 近场大津法：只统计视野下部，输出阈值、前后景对比度、白板像素占比
-// 远端在弯道上会被赛道外背景填满，全幅统计会让阈值随弯道漂移 -> 整帧判定翻转
 static uint8_t get_near_otsu (
     uint8_t image[][MT9V03X_W],
     int *out_contrast,
@@ -157,13 +175,123 @@ static uint8_t get_near_otsu (
         white += histogram[t];
     }
 
-    if (out_contrast) {
-        *out_contrast = (int)best_diff;
-    }
-    if (out_white_pct) {
-        *out_white_pct = (white * 100) / total_pixels;
-    }
+    if (out_contrast) *out_contrast = (int)best_diff;
+    if (out_white_pct) *out_white_pct = (white * 100) / total_pixels;
     return threshold;
+}
+
+// 单行找白段。
+// seed >= 0 时从 seed 附近起步（左右各找 20px 内的白点）；
+// seed < 0 时全行扫描，返回最长白段。
+// 判“边”的规则：连续 3 个暗像素才认为是赛道外的暗区。
+// 白带上的拼缝/胶带只有 1~2px 宽，会被这里过滤掉，不会把道宽截断。
+static int scan_row_seg (
+    const uint8_t *rowp,
+    int n,
+    int seed,
+    int *out_l,
+    int *out_r,
+    int *out_lf,
+    int *out_rf
+) {
+    int l = 0;
+    int r = n - 1;
+    int lf = 0;
+    int rf = 0;
+
+    if (seed >= 0) {
+        // 起点落在暗区时，在左右 20px 内找最近的白点
+        if (rowp[seed] == 0) {
+            int found = 0;
+            for (int off = 1; off <= 20 && !found; off++) {
+                int rx = seed + off;
+                int lx = seed - off;
+                if (rx < n && rowp[rx] == 255) {
+                    seed = rx;
+                    found = 1;
+                } else if (lx >= 0 && rowp[lx] == 255) {
+                    seed = lx;
+                    found = 1;
+                }
+            }
+            if (!found) {
+                return 0;
+            }
+        }
+
+        int dark = 0;
+        for (int x = seed; x >= 0; x--) {
+            if (rowp[x] == 0) {
+                if (++dark >= 3) {
+                    l = x + 3;
+                    lf = 1;
+                    break;
+                }
+            } else {
+                dark = 0;
+            }
+        }
+        dark = 0;
+        for (int x = seed; x < n; x++) {
+            if (rowp[x] == 0) {
+                if (++dark >= 3) {
+                    r = x - 3;
+                    rf = 1;
+                    break;
+                }
+            } else {
+                dark = 0;
+            }
+        }
+        if (r < l) {
+            return 0;
+        }
+        *out_l = l;
+        *out_r = r;
+        *out_lf = lf;
+        *out_rf = rf;
+        return r - l + 1;
+    }
+
+    // 全行最长白段
+    int best = 0;
+    int bl = 0;
+    int br = 0;
+    int x = 0;
+    while (x < n) {
+        if (rowp[x] == 0) {
+            x++;
+            continue;
+        }
+        int s = x;
+        int e = x;
+        int dark = 0;
+        for (; x < n; x++) {
+            if (rowp[x] == 255) {
+                e = x;
+                dark = 0;
+            } else {
+                if (++dark >= 3) {
+                    break;
+                }
+            }
+        }
+        int len = e - s + 1;
+        if (len > best) {
+            best = len;
+            bl = s;
+            br = e;
+        }
+        x++;
+    }
+    if (best <= 0) {
+        return 0;
+    }
+    *out_l = bl;
+    *out_r = br;
+    *out_lf = (bl > 0);
+    *out_rf = (br < n - 1);
+    return best;
 }
 
 static void drive_stop (void) {
@@ -174,7 +302,7 @@ static void drive_stop (void) {
     pwm_set_duty (motor2_in2, 0);
 }
 
-// 丢线滑行：舵机保持上一次打角，电机只给一小截占空比，避免“断电-满占空比”反复冲击
+// 丢线滑行：舵机保持上一次打角，电机给一小截占空比，避免“断电-满占空比”反复冲击
 static void drive_creep (void) {
     int creep = base_speed * LOST_CREEP_PCT / 100;
     pwm_set_duty (motor1_in1, 0);
@@ -195,11 +323,22 @@ static float clamp_float (float val, float lo, float hi) {
     return val;
 }
 
-// 电机占空比斜坡，避免 0 <-> 1350 瞬间跳变造成车体顿挫
+static int iabs (int v) {
+    return v < 0 ? -v : v;
+}
+
+// 电机占空比斜坡，避免 0 <-> 3000 瞬间跳变造成车体顿挫
 static int speed_ramp (int cur, int target) {
     if (target > cur + SPEED_RAMP_STEP) return cur + SPEED_RAMP_STEP;
     if (target < cur - SPEED_RAMP_STEP) return cur - SPEED_RAMP_STEP;
     return target;
+}
+
+// 近场半宽 -> 该扫描行的预期半宽（线性透视收缩）
+static float persp_half (float near_half, int row) {
+    float t = ((float)SENSE_ROW_0 - (float)row) / ((float)SENSE_ROW_0 - (float)SCAN_TOP_ROW);
+    t = clamp_float (t, 0.0f, 1.0f);
+    return near_half * (1.0f - (1.0f - PERSP_FAR_RATIO) * t);
 }
 
 int main (void) {
@@ -217,13 +356,6 @@ int main (void) {
     tft180_show_string (0, 0, "WAIT CAM     ");
     tft180_show_string (0, 64, "n=0     ");
 
-    // 每一扫描行的经验半宽（只从真实双边行学习，解决近宽远窄透视误差）
-    static float s_row_half_w[SCAN_ROWS];
-    for (int i = 0; i < SCAN_ROWS; i++) {
-        // 先验：近端(i=0)半宽约 62px，远端(i=max)半宽约 32px
-        s_row_half_w[i] = 62.0f - (30.0f * (float)i) / (float)(SCAN_ROWS - 1);
-    }
-
     uint8_t otsu_T = 0;
     float image_error = 0.0f;
     uint8_t image_valid = 0;
@@ -234,7 +366,9 @@ int main (void) {
     uint32_t frame_cnt = 0;
     int lost_frames = 0;
     int speed_cmd = 0;
-    uint8_t state_drawn = 0xFF;     // 0=LOST 1=RUN 2=CROSS 3=HOLD，用于只在变化时刷屏
+    uint8_t state_drawn = 0xFF;     // 0=LOST 1=RUN 2=CROSS 3=HOLD
+    float s_near_half = 55.0f;      // 赛道近场半宽的滑动估计（像素），由实测驱动
+    int s_near_w = 0;               // 上一帧近场道宽，用于丢帧兜底
 
     while (1) {
         // step 1 检测入口：等待摄像头新帧；超时无帧按丢线停车
@@ -255,7 +389,7 @@ int main (void) {
         last_frame_tick = g_tick_ms;
         frame_cnt++;
 
-        // step 2 二值化：近场 ROI 大津阈值；白占比作为“有没有看到白板”的判据
+        // step 2 二值化：近场 ROI 大津阈值；白占比校验“画面里确实有白带”
         int otsu_contrast = 0;
         int white_pct = 0;
         otsu_T = get_near_otsu (mt9v03x_image, &otsu_contrast, &white_pct);
@@ -265,216 +399,156 @@ int main (void) {
             }
         }
 
-        // step 3 找线：
-        // 3.1 抗板缝 & 避车头种子列：先跳过底部可能拍到的黑色车头/轮胎，再统计最长白列（允许跨越 <=2 行黑缝）
-        int col_len[MT9V03X_W];
-        int max_white_len = 0;
-        for (int x = 2; x < MT9V03X_W - 2; x++) {
-            int y = MT9V03X_H - 4;
-            while (y >= (MT9V03X_H / 2) && mt9v03x_image[y][x] == 0) {
-                y--;
+        // step 3.1 近场基准行：实测赛道宽度，作为本帧的像素尺度
+        int near_w = 0;
+        int near_l = 0;
+        int near_r = MT9V03X_W - 1;
+        int sense_rows[3] = { SENSE_ROW_0, SENSE_ROW_1, SENSE_ROW_2 };
+        for (int s = 0; s < 3; s++) {
+            int row = sense_rows[s];
+            int l, r, lf, rf;
+            int w = scan_row_seg (mt9v03x_image[row], MT9V03X_W, MT9V03X_W / 2, &l, &r, &lf, &rf);
+            // 只有“双边都塌实”或“一侧到边界”的宽段才可信
+            if (w >= NEAR_SEG_MIN_W && w <= MT9V03X_W) {
+                if (w > near_w) {
+                    near_w = w;
+                    near_l = l;
+                    near_r = r;
+                }
             }
-            int len = 0;
-            int dark_gap = 0;
-            for (; y >= 0; y--) {
-                if (mt9v03x_image[y][x] == 255) {
-                    len += 1 + dark_gap;
-                    dark_gap = 0;
-                } else {
-                    dark_gap++;
-                    if (dark_gap > 2) {
-                        break;
+        }
+        // 中心落进蓝区（车已偏出赛道）时，退化为全行最长白段
+        if (near_w == 0) {
+            for (int s = 0; s < 3; s++) {
+                int row = sense_rows[s];
+                int l, r, lf, rf;
+                int w = scan_row_seg (mt9v03x_image[row], MT9V03X_W, -1, &l, &r, &lf, &rf);
+                if (w >= NEAR_SEG_MIN_W) {
+                    if (w > near_w) {
+                        near_w = w;
+                        near_l = l;
+                        near_r = r;
                     }
                 }
             }
-            col_len[x] = len;
-            if (len > max_white_len) {
-                max_white_len = len;
-            }
         }
 
-        int seed_sum = 0;
-        int seed_cnt = 0;
-        if (max_white_len > 0) {
-            int len_floor = max_white_len > 6 ? (max_white_len - 5) : 1;
-            for (int x = 2; x < MT9V03X_W - 2; x++) {
-                if (col_len[x] >= len_floor) {
-                    seed_sum += x;
-                    seed_cnt++;
-                }
-            }
+        if (near_w >= NEAR_SEG_MIN_W) {
+            s_near_w = near_w;
+            // 慢学习：避免单帧异常（贴边、横叉）把尺度带跑
+            float meas_half = 0.5f * (float)near_w;
+            meas_half = clamp_float (meas_half, 26.0f, 92.0f);
+            s_near_half += 0.30f * (meas_half - s_near_half);
+        } else {
+            near_w = s_near_w;
         }
-        int start_x = seed_cnt > 0 ? (seed_sum / seed_cnt) : (MT9V03X_W / 2);
+        float near_half = clamp_float (s_near_half, 26.0f, 92.0f);
+        int near_center = (near_l + near_r) / 2;
 
-        // 3.2 从近到远逐行跟踪搜边（允许每行相对上一行轻微摆动，跳过横向黑缝）
-        float both_w_sum = 0.0f;
-        float both_weight_sum = 0.0f;
-        int both_cnt = 0;
-
-        float all_w_sum = 0.0f;
-        float all_weight_sum = 0.0f;
+        // step 3.2 从近到远逐行跟踪，带连续性约束
+        float wsum = 0.0f;
+        float wtot = 0.0f;
         int valid_cnt = 0;
-        int edge_missing_rows = 0;  // 整行左右都没有黑边（真正的十字特征）
-        int mid_width = 0;
+        int cross_rows = 0;
 
-        int track_x = start_x;
+        int prev_l = near_l;
+        int prev_r = near_r;
+        int have_prev = (near_w >= NEAR_SEG_MIN_W);
+
         for (int i = 0; i < SCAN_ROWS; i++) {
             int row = SCAN_BOT_ROW - i * SCAN_STEP;
-            if (row < 1) {
+            if (row <= SCAN_TOP_ROW) {
                 break;
             }
 
-            // 若当前 track_x 恰好踩中板缝或车头噪点，在其左右 +/-30px 内寻找最近白点
-            int row_seed = track_x;
-            if (mt9v03x_image[row][row_seed] == 0) {
-                int found = 0;
-                for (int off = 1; off <= 30; off++) {
-                    int rx = track_x + off;
-                    int lx = track_x - off;
-                    if (rx < MT9V03X_W - 1 && mt9v03x_image[row][rx] == 255) {
-                        row_seed = rx;
-                        found = 1;
-                        break;
-                    }
-                    if (lx > 0 && mt9v03x_image[row][lx] == 255) {
-                        row_seed = lx;
-                        found = 1;
-                        break;
-                    }
-                }
-                if (!found) {
-                    // 整行近处都是黑（板缝黑行 / 车头遮挡 / 越过远端视野），不计入十字特征
-                    continue;
-                }
+            int seed = have_prev ? ((prev_l + prev_r) / 2) : (MT9V03X_W / 2);
+            seed = clamp_int (seed, 1, MT9V03X_W - 2);
+
+            int l, r, lf, rf;
+            int w = scan_row_seg (mt9v03x_image[row], MT9V03X_W, seed, &l, &r, &lf, &rf);
+            if (w < 8) {
+                continue;
             }
 
-            int l = 0;
-            int r = MT9V03X_W - 1;
-            uint8_t lf = 0;
-            uint8_t rf = 0;
+            float half_exp = persp_half (near_half, row);
+            float max_ok_w = 2.4f * half_exp;
 
-            for (int x = row_seed; x >= 1; x--) {
-                if (mt9v03x_image[row][x] == 0 && mt9v03x_image[row][x - 1] == 0) {
-                    l = x + 1;
-                    lf = 1;
-                    break;
-                }
-            }
-            for (int x = row_seed; x < MT9V03X_W - 1; x++) {
-                if (mt9v03x_image[row][x] == 0 && mt9v03x_image[row][x + 1] == 0) {
-                    r = x - 1;
-                    rf = 1;
-                    break;
-                }
-            }
-
-            float expected_w = s_row_half_w[i] * 2.0f;
-            float max_valid_w = expected_w * 1.45f;
-            if (max_valid_w > (float)(MT9V03X_W - 12)) {
-                max_valid_w = (float)(MT9V03X_W - 12);
-            }
-
-            // 前瞻权重：中近段(row 85~45)权重最高，兼顾居中稳定性与入弯提前量
-            float weight = 1.0f;
-            if (row <= 92 && row >= 44) {
-                weight = 1.6f;
-            } else if (row < 44) {
-                weight = 1.0f;
+            // 近场优先权重：车头正前方才是当前姿态，远端只用来看弯道趋势
+            float weight;
+            if (row >= 96) {
+                weight = 1.9f;
+            } else if (row >= 72) {
+                weight = 1.4f;
+            } else {
+                weight = 0.7f;
             }
 
             if (lf && rf) {
-                int w = r - l;
-                if (w < 8) {
-                    // 极窄白隙通常是黑缝边缘残片，跳过
-                    continue;
+                // 双边都有：最可信
+                if ((float)w > max_ok_w) {
+                    continue;   // 明显超宽（横叉/十字横道），不用于定中心
                 }
-                if ((float)w > max_valid_w) {
-                    // 宽度超限只丢弃这一行，不算十字：宽度估计有偏差时不会把直道判成十字
-                    continue;
+                if (have_prev && (iabs(l - prev_l) > CONTINUITY_PX || iabs(r - prev_r) > CONTINUITY_PX)) {
+                    continue;   // 与上一行跳变过大：白带上的污渍或跨到别的赛道段
                 }
-
                 float c = 0.5f * (float)(l + r);
-                both_w_sum += c * weight;
-                both_weight_sum += weight;
-                both_cnt++;
-
-                all_w_sum += c * weight;
-                all_weight_sum += weight;
+                wsum += c * weight;
+                wtot += weight;
                 valid_cnt++;
-
-                // 在线平滑更新本行真实半宽（慢学习，避免单帧异常把门限带偏）
-                float meas_half = 0.5f * (float)w;
-                if (meas_half >= 14.0f && meas_half <= 92.0f) {
-                    s_row_half_w[i] += 0.05f * (meas_half - s_row_half_w[i]);
-                }
-                if (row >= 75 && row <= 85) {
-                    mid_width = w;
-                } else if (mid_width == 0) {
-                    mid_width = w;
-                }
-                track_x = clamp_int ((int)c, 2, MT9V03X_W - 3);
-            } else if (!lf && !rf) {
-                // 左右同时全白到达图像边界：典型十字横道
-                edge_missing_rows++;
+                prev_l = l;
+                prev_r = r;
+                have_prev = 1;
             } else if (lf && !rf) {
-                int vis_w = (MT9V03X_W - 1) - l;
-                if ((float)vis_w > max_valid_w) {
-                    // 单侧已超出正常道宽并延展到右边界：不按右弯外推，丢弃该行
-                    continue;
-                }
-                if (l < MT9V03X_W - 8) {
-                    // 右丢线（向右急弯）：按该行经验半宽向右侧外推真实中心
-                    float c = (float)l + s_row_half_w[i];
-                    all_w_sum += c * weight;
-                    all_weight_sum += weight;
-                    valid_cnt++;
-                    track_x = clamp_int ((l + (MT9V03X_W - 1)) / 2, 2, MT9V03X_W - 3);
-                }
+                // 右边界出画（向右急弯）：按该行预期半宽外推
+                float c = (float)l + half_exp;
+                wsum += c * (weight * 0.7f);
+                wtot += weight * 0.7f;
+                valid_cnt++;
+                prev_l = l;
+                prev_r = (int)((float)l + 2.0f * half_exp);
+                have_prev = 1;
+            } else if (!lf && rf) {
+                // 左边界出画（向左急弯）
+                float c = (float)r - half_exp;
+                wsum += c * (weight * 0.7f);
+                wtot += weight * 0.7f;
+                valid_cnt++;
+                prev_r = r;
+                prev_l = (int)((float)r - 2.0f * half_exp);
+                have_prev = 1;
             } else {
-                int vis_w = r;
-                if ((float)vis_w > max_valid_w) {
-                    // 单侧已超出正常道宽并延展到左边界：不按左弯外推，丢弃该行
-                    continue;
-                }
-                if (r > 7) {
-                    // 左丢线（向左急弯）：按该行经验半宽向左侧外推真实中心
-                    float c = (float)r - s_row_half_w[i];
-                    all_w_sum += c * weight;
-                    all_weight_sum += weight;
-                    valid_cnt++;
-                    track_x = clamp_int (r / 2, 2, MT9V03X_W - 3);
-                }
+                // 左右都没有连续暗区：整行全白，典型十字横道特征
+                cross_rows++;
             }
         }
 
-        // 3.3 十字判定与最终中心融合
-        uint8_t is_cross = ((float)edge_missing_rows >= CROSS_ROWS_RATIO * (float)SCAN_ROWS);
-        float center_x = (float)start_x;
+        // step 3.3 中心融合
+        uint8_t is_cross = ((float)cross_rows >= CROSS_ROWS_RATIO * (float)SCAN_ROWS);
+        float center_x = (float)near_center;
+        if (valid_cnt >= 3 && wtot > 0.0f) {
+            center_x = wsum / wtot;
+        } else if (valid_cnt >= 1 && wtot > 0.0f) {
+            // 有效行太少：近场基准与实际跟踪各占一半，不信任单点
+            center_x = 0.5f * (float)near_center + 0.5f * (wsum / wtot);
+        }
         if (is_cross) {
-            if (both_cnt >= 2 && both_weight_sum > 0.0f) {
-                // 十字前后仍看得到正常双边时，只用正常双边居中穿越，不误拐进横叉
-                center_x = both_w_sum / both_weight_sum;
-            } else {
-                // 身处十字正中全白区：保留少量进十字前误差趋势平稳直行
-                center_x = HALF_W + 0.30f * last_valid_error;
-            }
-        } else if (valid_cnt > 0 && all_weight_sum > 0.0f) {
-            // 弯道/直道：同时融合双边与单边外推前瞻行，不再被底边直道行屏蔽
-            center_x = all_w_sum / all_weight_sum;
+            // 身处十字正中：保留少量进十字前的误差趋势，平稳直行
+            center_x = HALF_W + 0.30f * last_valid_error;
         }
         center_x = clamp_float (center_x, -HALF_W, 1.5f * (float)MT9V03X_W);
 
-        // 有效性只看“近场有没有白板 + 有没有找到线”，不再被最大白列长度绑架
+        // 有效性：画面要有白带、近场要能量到宽度、并且找到了线
         uint8_t image_ok = (otsu_contrast >= MIN_CONTRAST
                             && white_pct >= NEAR_WHITE_MIN_PCT
+                            && near_w >= NEAR_SEG_MIN_W
                             && (valid_cnt > 0 || is_cross));
 
-        // step 4 闭环控制：归一化 PD + 弯道自减速 + 丢线保持
+        // step 4 闭环控制：按实测半宽归一化 PD + 弯道自减速 + 丢线保持
         if (image_ok) {
             lost_frames = 0;
             image_error = center_x - HALF_W;
             image_valid = 1;
-            if (!is_cross && both_cnt >= 2) {
+            if (!is_cross && valid_cnt >= 2) {
                 last_valid_error = image_error;
             }
 
@@ -490,9 +564,9 @@ int main (void) {
                 eff_error = filt_error * k;
             }
 
-            // 按半幅归一化：只有接近满幅的误差才顶满舵，不再 50px 就打满
-            float norm_e = eff_error / HALF_W;
-            float d_norm = (eff_error - prev_error) / HALF_W;
+            // 归一化：偏差达到半个实测赛道宽才打满舵，不再 50px 就打满
+            float norm_e = clamp_float (eff_error / near_half, -1.8f, 1.8f);
+            float d_norm = clamp_float ((eff_error - prev_error) / near_half, -1.8f, 1.8f);
             prev_error = eff_error;
 
             float d_term = clamp_float (KD_NORM * d_norm, -D_TERM_LIMIT, D_TERM_LIMIT);
@@ -500,7 +574,9 @@ int main (void) {
             servo_turn = clamp_float (servo_turn, -(float)MAX_SERVO_TURN, (float)MAX_SERVO_TURN);
             pwm_set_duty (servo, (uint32)(servo_center + (int)servo_turn));
 
-            int target_speed = base_speed - (int)(abs_err * TURN_SLOW_GAIN);
+            float absn = norm_e >= 0.0f ? norm_e : -norm_e;
+            if (absn > 1.0f) absn = 1.0f;
+            int target_speed = (int)((float)base_speed * (1.0f - TURN_SLOW_RATIO * absn));
             if (target_speed < turn_min_speed) target_speed = turn_min_speed;
             if (target_speed > max_speed) target_speed = max_speed;
             speed_cmd = speed_ramp (speed_cmd, target_speed);
@@ -509,7 +585,7 @@ int main (void) {
             pwm_set_duty (motor2_in1, 0);
             pwm_set_duty (motor2_in2, (uint32)speed_cmd);
         } else {
-            // 丢线不再立刻断电：短时间内保持舵机 + 低速滑行，避免每帧“刹-冲”造成抽搐
+            // 丢线不再立刻断电：短时间内保持舵机 + 低速滑行
             if (lost_frames < 250) {
                 lost_frames++;
             }
@@ -523,7 +599,7 @@ int main (void) {
             }
         }
 
-        // step 5 降频状态显示（状态切换立即刷新，其余每 10 帧刷新遥测）
+        // step 5 降频状态显示
         uint8_t refresh_now = (frame_cnt == 1 || (frame_cnt % TFT_REFRESH_DIV == 0));
         uint8_t state_now;
         if (image_valid && image_ok) {
@@ -543,8 +619,7 @@ int main (void) {
                 tft180_show_string (0, 0, "CROSS        ");
             } else {
                 float abs_err = image_error >= 0.0f ? image_error : -image_error;
-                int ref_w = mid_width > 15 ? mid_width : 80;
-                if (abs_err < CENTER_OK_RATIO * (float)ref_w) {
+                if (abs_err < CENTER_OK_RATIO * near_half) {
                     tft180_show_string (0, 0, "1111111111111");
                 } else {
                     tft180_show_string (0, 0, "33333333333  ");
@@ -554,19 +629,20 @@ int main (void) {
         }
 
         if (refresh_now) {
-            int disp_c = otsu_contrast > 0 ? otsu_contrast : 0;
             tft180_show_string (0, 16, "C=");
-            tft180_show_uint (16, 16, (uint32)disp_c, 3);
+            tft180_show_uint (16, 16, (uint32)(otsu_contrast > 0 ? otsu_contrast : 0), 3);
             tft180_show_string (48, 16, "P=");
             tft180_show_uint (64, 16, (uint32)white_pct, 3);
             tft180_show_string (0, 32, "W=");
-            tft180_show_uint (16, 32, (uint32)mid_width, 3);
-            tft180_show_string (48, 32, "L=");
-            tft180_show_uint (64, 32, (uint32)max_white_len, 3);
+            tft180_show_uint (16, 32, (uint32)near_w, 3);
+            tft180_show_string (48, 32, "v=");
+            tft180_show_uint (64, 32, (uint32)valid_cnt, 2);
+            tft180_show_string (80, 32, "h=");
+            tft180_show_uint (96, 32, (uint32)((int)near_half), 2);
             tft180_show_string (0, 48, "e=");
             tft180_show_int (16, 48, (int)image_error, 4);
-            tft180_show_string (56, 48, "v=");
-            tft180_show_uint (72, 48, (uint32)valid_cnt, 2);
+            tft180_show_string (56, 48, "x=");
+            tft180_show_uint (72, 48, (uint32)cross_rows, 2);
             tft180_show_string (0, 64, "n=");
             tft180_show_uint (16, 64, frame_cnt, 6);
         }
