@@ -60,7 +60,7 @@
 #define ERROR_LPF_ALPHA     0.55f   // 误差低通滤波系数
 #define DEADBAND_PX         2.5f    // 中心小死区（像素），死区内线性收敛不留阶跃
 
-#define base_speed          1600    // 直道基础占空比（满分 10000）
+#define base_speed          1200    // 直道基础占空比（满分 10000）；差速跑稳后再一档档往上加
 #define turn_min_speed      900     // 急弯最低保底占空比（防弯道降速过多堵转）
 #define max_speed           2200    // 最大限速保护
 #define TURN_SLOW_GAIN      7.0f    // 弯道减速系数：误差越大适当减速（原来 4.5 太弱，急弯来不及收速）
@@ -75,6 +75,13 @@
 #define TFT_REFRESH_DIV     10      // 每 10 帧刷一次屏幕（首帧与状态切换时立即刷新）
 #define LOST_HOLD_FRAMES    6       // 连续丢线容忍帧数，之内保持舵机滑行
 #define LOST_CREEP_PCT      45      // 丢线滑行占基础速度的百分比
+
+// ── 电子差速（左右轮独立 PWM，没有机械差速器）──────────────────────────────────
+// 两轮被强行走同样距离时，弯里只能靠轮胎打滑硬拐，速度越快越推头。
+// 这里在弯道让内轮减速、外轮加速，等于软件做出差速效果。
+#define DIFF_ENABLE         1       // 0 = 关闭，恢复左右同速
+#define DIFF_GAIN           0.30f   // 满幅误差时内外轮的速度差比例（0.3 = 差 30%）
+#define DIFF_DIR            1       // 差速方向：若弯里反而更转不过来，改成 -1
 
 #define SCAN_BOT_ROW        (MT9V03X_H - 10)
 #define SCAN_TOP_ROW        40
@@ -497,10 +504,37 @@ int main (void) {
             if (target_speed < turn_min_speed) target_speed = turn_min_speed;
             if (target_speed > max_speed) target_speed = max_speed;
             speed_cmd = speed_ramp (speed_cmd, target_speed);
+            // 电子差速：norm_e>0 表示赛道中心在画面右侧 → 要向右转 → 右轮内、左轮外
+            int sp_l = speed_cmd;
+            int sp_r = speed_cmd;
+#if DIFF_ENABLE
+            {
+                float ke = norm_e >= 0.0f ? norm_e : -norm_e;
+                float kr = ke * DIFF_GAIN;
+                if (kr > 0.45f) kr = 0.45f;
+                int dv = (int)((float)speed_cmd * kr);
+                if (norm_e > 0.0f) {
+                    sp_l = speed_cmd + dv;
+                    sp_r = speed_cmd - dv;
+                } else if (norm_e < 0.0f) {
+                    sp_l = speed_cmd - dv;
+                    sp_r = speed_cmd + dv;
+                }
+                if (sp_l < 0) sp_l = 0;
+                if (sp_r < 0) sp_r = 0;
+                if (sp_l > max_speed) sp_l = max_speed;
+                if (sp_r > max_speed) sp_r = max_speed;
+            }
+#endif
+            if (DIFF_DIR < 0) {
+                int t = sp_l;
+                sp_l = sp_r;
+                sp_r = t;
+            }
             pwm_set_duty (motor1_in1, 0);
-            pwm_set_duty (motor1_in2, (uint32)speed_cmd);
+            pwm_set_duty (motor1_in2, (uint32)sp_l);
             pwm_set_duty (motor2_in1, 0);
-            pwm_set_duty (motor2_in2, (uint32)speed_cmd);
+            pwm_set_duty (motor2_in2, (uint32)sp_r);
         } else {
             // 丢线不再立刻断电：短时间内保持舵机 + 低速滑行，避免每帧“刹-冲”造成抽搐
             if (lost_frames < 250) {
