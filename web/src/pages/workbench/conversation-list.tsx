@@ -386,20 +386,20 @@ export function ConversationList({ space, open, onClose }: Props) {
           </span>
           <ThemeMenu />
           <Link
-            to="/admin"
-            aria-label="中控台"
-            title="中控台 · 用户管理"
-            className="inline-flex h-7 w-7 items-center justify-center rounded-field text-fg-subtle hover:bg-bg-subtle hover:text-fg"
-          >
-            <SlidersHorizontal size={14} />
-          </Link>
+              to="/admin"
+              aria-label="中控台"
+              title="中控台 · 用户管理"
+              className="inline-flex h-7 w-7 items-center justify-center rounded-field text-fg-subtle hover:bg-bg-subtle hover:text-fg"
+            >
+              <SlidersHorizontal size={14} />
+            </Link>
           <Link
-            to="/login"
-            aria-label="退出"
-            className="inline-flex h-7 w-7 items-center justify-center rounded-field text-fg-subtle hover:bg-bg-subtle hover:text-fg"
-          >
-            <LogOut size={14} />
-          </Link>
+              to="/login"
+              aria-label="退出"
+              className="inline-flex h-7 w-7 items-center justify-center rounded-field text-fg-subtle hover:bg-bg-subtle hover:text-fg"
+            >
+              <LogOut size={14} />
+            </Link>
         </div>
       </aside>
 
