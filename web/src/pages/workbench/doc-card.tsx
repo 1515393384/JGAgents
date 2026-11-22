@@ -18,6 +18,7 @@ import {
   DocClientError,
   downloadDocRevision,
   fetchDocDiff,
+  fetchDocRender,
   getDocDetail,
   listDocs,
   patchDocEdits,
@@ -31,6 +32,13 @@ import {
   type DocRecord,
   type DocSearchHit,
   type ExportMode,
+  type PageSetup,
+  type ParaFmt,
+  type RPara,
+  type RenderBlock,
+  type RenderSlice,
+  type RTable,
+  type RunFmt,
 } from '../../lib/docs'
 
 type ViewTab = 'body' | 'outline' | 'diff'
@@ -70,6 +78,9 @@ export function DocCard({
   const [onlyChangedDiff, setOnlyChangedDiff] = useState(true)
 
   const [focusedAnchor, setFocusedAnchor] = useState<string | null>(null)
+  const [render, setRender] = useState<RenderSlice | null>(null)
+  const [renderLoading, setRenderLoading] = useState(false)
+  const [renderMissing, setRenderMissing] = useState(false)
 
   const uploadInputRef = useRef<HTMLInputElement | null>(null)
   const revUploadInputRef = useRef<HTMLInputElement | null>(null)
@@ -154,6 +165,32 @@ export function DocCard({
       cancelled = true
     }
   }, [detail, tab, diffFromRev, diffToRev])
+
+  useEffect(() => {
+    const docId = detail?.doc.id
+    const rev = detail?.doc.currentRev
+    if (!docId || rev === undefined || tab !== 'body') return
+    let cancelled = false
+    setRenderLoading(true)
+    setRenderMissing(false)
+    void (async () => {
+      try {
+        const slice = await fetchDocRender(docId, { rev })
+        if (cancelled) return
+        setRender(slice)
+        setRenderMissing(slice === null)
+      } catch {
+        if (cancelled) return
+        setRender(null)
+        setRenderMissing(true)
+      } finally {
+        if (!cancelled) setRenderLoading(false)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [detail?.doc.id, detail?.doc.currentRev, tab])
 
   const handleUploadNewDoc = async (file: File | undefined) => {
     if (!file) return
@@ -345,6 +382,40 @@ export function DocCard({
   const statusText = detail
     ? `${latestRevMeta?.nodeCount ?? primaryNodes.length} 节点 · ${latestRevMeta?.tableCount ?? 0} 表格 · ${latestRevMeta?.mandatoryCount ?? mandatoryNodes.length} 硬约束`
     : undefined
+
+  const nodeByAnchor = useMemo(() => {
+    const map = new Map<string, DocNodeRecord>()
+    for (const n of detail?.nodes ?? []) map.set(n.anchorId, n)
+    return map
+  }, [detail])
+
+  const blockCtx: BlockCtx = {
+    nodeByAnchor,
+    refsByAnchor,
+    focusedAnchor,
+    editingAnchor,
+    editDraft,
+    editMode,
+    onDraftChange: setEditDraft,
+    onModeChange: setEditMode,
+    onStartEdit: (node) => {
+      if (node.locked) {
+        setErrorBanner({
+          message: `条款 ${node.anchorId} 已锁定，请先解除保护后再修改。`,
+          legacyDocHint: false,
+        })
+        return
+      }
+      setEditingAnchor(node.anchorId)
+      setEditDraft(node.textContent)
+    },
+    onCancelEdit: () => setEditingAnchor(null),
+    onCommitEdit: (node) => void handleCommitEdit(node),
+    onToggleLock: (node) => void handleToggleLock(node),
+    registerRef: (anchor, el) => {
+      nodeRefs.current[anchor] = el
+    },
+  }
 
   return (
     <MicroWindow
@@ -620,152 +691,14 @@ export function DocCard({
               </div>
             ) : null}
 
-            {/* 视图 1：正文与段落 */}
+            {/* 视图 1：正文页 —— 版式渲染，人看的唯一视图 */}
             {tab === 'body' ? (
-              <div className="divide-y divide-surface-border/70">
-                {primaryNodes.map((node) => {
-                  const refs = refsByAnchor.get(node.anchorId) ?? []
-                  const isEditing = editingAnchor === node.anchorId
-                  const isFocused = focusedAnchor === node.anchorId
-                  const isHeading = node.nodeKind === 'heading'
-                  const isTable = node.nodeKind === 'table' || node.nodeKind === 'table_chunk'
-
-                  return (
-                    <div
-                      key={node.anchorId}
-                      ref={(el) => {
-                        nodeRefs.current[node.anchorId] = el
-                      }}
-                      className={
-                        'py-3 first:pt-0 last:pb-0 transition-colors ' +
-                        (isFocused ? 'bg-brand-soft/45 px-2 -mx-2 rounded-[6px]' : '')
-                      }
-                    >
-                      <div className="mb-1 flex flex-wrap items-center gap-2 text-[11px] text-fg-subtle">
-                        <span className="font-mono tabular-nums">{node.anchorId}</span>
-                        <span>·</span>
-                        <span className="font-mono tabular-nums">{node.tokenEstimate} tok</span>
-                        {node.mandatoryTags.length > 0 ? (
-                          <>
-                            <span>·</span>
-                            <span className="font-medium text-warn">
-                              {node.mandatoryTags.join(' / ')}
-                            </span>
-                          </>
-                        ) : null}
-                        {refs.length > 0 ? (
-                          <>
-                            <span>·</span>
-                            <span className="text-brand">引用 {refs.join('、')}</span>
-                          </>
-                        ) : null}
-
-                        <div className="ml-auto flex items-center gap-2">
-                          <button
-                            type="button"
-                            onClick={() => void handleToggleLock(node)}
-                            title={node.locked ? '已锁定，点击解锁' : '点击锁定关键条款防误改'}
-                            className={
-                              'inline-flex items-center gap-1 text-[11px] transition-colors ' +
-                              (node.locked ? 'font-medium text-warn' : 'text-fg-subtle hover:text-fg')
-                            }
-                          >
-                            {node.locked ? <Lock size={11} /> : <Unlock size={11} />}
-                            {node.locked ? '已锁定' : '锁定'}
-                          </button>
-
-                          {!isTable && node.xmlLocator.startsWith('p:') ? (
-                            <button
-                              type="button"
-                              onClick={() => {
-                                if (node.locked) {
-                                  setErrorBanner({
-                                    message: `条款 ${node.anchorId} 已锁定，请先点击“已锁定”解除保护后再修改。`,
-                                    legacyDocHint: false,
-                                  })
-                                  return
-                                }
-                                setEditingAnchor(node.anchorId)
-                                setEditDraft(node.textContent)
-                              }}
-                              className="inline-flex items-center gap-1 text-[11px] text-fg-subtle hover:text-fg"
-                            >
-                              <Pencil size={11} />
-                              修订
-                            </button>
-                          ) : null}
-                        </div>
-                      </div>
-
-                      {isEditing ? (
-                        <div className="mt-1.5 space-y-2">
-                          <textarea
-                            rows={3}
-                            value={editDraft}
-                            onChange={(e) => setEditDraft(e.target.value)}
-                            className="w-full rounded-[6px] border border-brand/60 bg-surface-sunken px-2.5 py-2 text-[13.5px] leading-6 text-fg outline-none"
-                          />
-                          <div className="flex flex-wrap items-center justify-between gap-2 text-[11.5px]">
-                            <div className="flex items-center gap-3 text-fg-muted">
-                              <label className="inline-flex items-center gap-1">
-                                <input
-                                  type="radio"
-                                  name="patchMode"
-                                  checked={editMode === 'redline'}
-                                  onChange={() => setEditMode('redline')}
-                                  className="accent-[var(--brand)]"
-                                />
-                                写入修订红线（&lt;w:ins&gt;/&lt;w:del&gt;）
-                              </label>
-                              <label className="inline-flex items-center gap-1">
-                                <input
-                                  type="radio"
-                                  name="patchMode"
-                                  checked={editMode === 'clean'}
-                                  onChange={() => setEditMode('clean')}
-                                  className="accent-[var(--brand)]"
-                                />
-                                净稿原位覆盖
-                              </label>
-                            </div>
-
-                            <div className="flex items-center gap-1.5">
-                              <button
-                                type="button"
-                                onClick={() => setEditingAnchor(null)}
-                                className="h-7 rounded-field border border-border px-2.5 text-fg-muted hover:text-fg"
-                              >
-                                取消
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => void handleCommitEdit(node)}
-                                className="inline-flex h-7 items-center gap-1 rounded-field bg-brand px-2.5 font-medium text-brand-fg hover:bg-brand-hover"
-                              >
-                                <Check size={12} />
-                                保存版本
-                              </button>
-                            </div>
-                          </div>
-                        </div>
-                      ) : isTable ? (
-                        <TableNodePreview text={node.textContent} />
-                      ) : (
-                        <p
-                          className={
-                            isHeading
-                              ? 'text-[15px] font-medium tracking-tight text-fg'
-                              : 'text-[13.5px] leading-7 ' +
-                                (node.locked ? 'text-fg' : 'text-fg-muted')
-                          }
-                        >
-                          {node.textContent}
-                        </p>
-                      )}
-                    </div>
-                  )
-                })}
-              </div>
+              <DocBody
+                slice={render}
+                loading={renderLoading}
+                missing={renderMissing}
+                ctx={blockCtx}
+              />
             ) : null}
 
             {/* 视图 2：目录与硬约束 */}
@@ -1015,40 +948,317 @@ export function DocCard({
   )
 }
 
-function TableNodePreview({ text }: { text: string }) {
-  const rows = text
-    .split('\n')
-    .map((r) => r.split('|').map((c) => c.trim()))
-    .filter((cells) => cells.some(Boolean))
+// ── 版式渲染（人类视图）─────────────────────────────────────────────────────
+// 只吃后端 render 切片：纸面尺寸/边距来自 sectPr，字样来自样式继承链展开后的确定值。
 
-  if (rows.length === 0) return null
-  const header = rows[0]!
-  const body = rows.slice(1)
+const TWIPS_PER_PX = 20
+
+function px(twipsValue: number | undefined | null): number | undefined {
+  if (!twipsValue || twipsValue <= 0) return undefined
+  return Math.round(twipsValue / TWIPS_PER_PX)
+}
+
+const HIGHLIGHT_COLORS: Record<string, string> = {
+  yellow: '#fff59d',
+  green: '#b9f6ca',
+  cyan: '#b2ebf2',
+  magenta: '#f8bbd0',
+  blue: '#bbdefb',
+  red: '#ffcdd2',
+  darkBlue: '#9fa8da',
+  darkCyan: '#80cbc4',
+  darkGreen: '#a5d6a7',
+  darkMagenta: '#ce93d8',
+  darkRed: '#ef9a9a',
+  darkGray: '#b0bec5',
+  lightGray: '#e0e0e0',
+  black: '#9e9e9e',
+}
+
+function alignOf(fmt: ParaFmt): React.CSSProperties['textAlign'] {
+  switch (fmt.align) {
+    case 'center':
+      return 'center'
+    case 'right':
+    case 'end':
+      return 'right'
+    case 'both':
+    case 'justify':
+    case 'distribute':
+      return 'justify'
+    default:
+      return 'left'
+  }
+}
+
+function runStyle(fmt: RunFmt): React.CSSProperties {
+  const deco = [fmt.underline ? 'underline' : '', fmt.strike ? 'line-through' : '']
+    .filter(Boolean)
+    .join(' ')
+  return {
+    fontWeight: fmt.bold ? 600 : undefined,
+    fontStyle: fmt.italic ? 'italic' : undefined,
+    textDecoration: deco || undefined,
+    fontSize: fmt.sizeHalfPt ? `${(fmt.sizeHalfPt / 2) * (4 / 3)}px` : undefined,
+    color: /^[0-9a-fA-F]{6}$/.test(fmt.color) ? `#${fmt.color}` : undefined,
+    fontFamily: fmt.font || undefined,
+    backgroundColor: HIGHLIGHT_COLORS[fmt.highlight] ?? undefined,
+    verticalAlign:
+      fmt.vertAlign === 'superscript' ? 'super' : fmt.vertAlign === 'subscript' ? 'sub' : undefined,
+  }
+}
+
+function DocPara({ para }: { para: RPara }) {
+  const fmt = para.fmt
+  const hasText = para.runs.some((r) => r.text.length > 0)
+  const style: React.CSSProperties = {
+    marginTop: px(fmt.spaceBeforeTwips),
+    marginBottom: px(fmt.spaceAfterTwips),
+    marginLeft: px(fmt.indentLeftTwips),
+    marginRight: px(fmt.indentRightTwips),
+    textIndent: px(fmt.indentFirstLineTwips),
+    textAlign: alignOf(fmt),
+    lineHeight: fmt.lineTwips ? `${px(fmt.lineTwips)}px` : undefined,
+    whiteSpace: 'pre-wrap',
+    overflowWrap: 'anywhere',
+  }
+
+  if (!hasText) {
+    return <p style={style} className="min-h-[1em]" />
+  }
 
   return (
-    <div className="mt-1 overflow-x-auto rounded-[6px] border border-surface-border">
-      <table className="w-full border-collapse text-left text-[12.5px]">
-        <thead>
-          <tr className="border-b border-surface-border bg-surface-sunken text-fg">
-            {header.map((cell, idx) => (
-              <th key={idx} className="px-2.5 py-1.5 font-medium">
-                {cell}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-surface-border/60">
-          {body.map((cells, rIdx) => (
-            <tr key={rIdx} className="text-fg-muted">
-              {cells.map((c, cIdx) => (
-                <td key={cIdx} className="px-2.5 py-1.5">
-                  {c}
+    <p style={style}>
+      {para.runs.map((run, idx) => (
+        <span key={idx} style={runStyle(run.fmt)}>
+          {run.text}
+        </span>
+      ))}
+    </p>
+  )
+}
+
+function DocTable({ table }: { table: RTable }) {
+  const gridSum = table.grid.reduce((a, b) => a + (b > 0 ? b : 0), 0)
+  const totalTwips = table.widthTwips > 0 ? table.widthTwips : gridSum
+
+  return (
+    <div className="my-2 overflow-x-auto">
+      <table
+        className="border-collapse text-left"
+        style={{ width: px(totalTwips) ?? '100%', tableLayout: gridSum > 0 ? 'fixed' : 'auto' }}
+      >
+        <tbody>
+          {table.rows.map((row, rIdx) => (
+            <tr key={rIdx}>
+              {row.cells.map((cell, cIdx) => (
+                <td
+                  key={cIdx}
+                  colSpan={cell.gridSpan > 1 ? cell.gridSpan : undefined}
+                  className={
+                    'border border-neutral-400 px-1.5 py-1 align-top' +
+                    (row.header ? ' bg-neutral-100 font-medium' : '')
+                  }
+                  style={{ width: px(cell.widthTwips) }}
+                >
+                  {cell.paras.length === 0 ? (
+                    <p className="min-h-[1em]" />
+                  ) : (
+                    cell.paras.map((p, pIdx) => <DocPara key={pIdx} para={p} />)
+                  )}
                 </td>
               ))}
             </tr>
           ))}
         </tbody>
       </table>
+    </div>
+  )
+}
+
+type BlockCtx = {
+  nodeByAnchor: Map<string, DocNodeRecord>
+  refsByAnchor: Map<string, string[]>
+  focusedAnchor: string | null
+  editingAnchor: string | null
+  editDraft: string
+  editMode: 'redline' | 'clean'
+  onDraftChange: (v: string) => void
+  onModeChange: (m: 'redline' | 'clean') => void
+  onStartEdit: (node: DocNodeRecord) => void
+  onCancelEdit: () => void
+  onCommitEdit: (node: DocNodeRecord) => void
+  onToggleLock: (node: DocNodeRecord) => void
+  registerRef: (anchor: string, el: HTMLDivElement | null) => void
+}
+
+function DocBody({
+  slice,
+  loading,
+  missing,
+  ctx,
+}: {
+  slice: RenderSlice | null
+  loading: boolean
+  missing: boolean
+  ctx: BlockCtx
+}) {
+  if (!slice) {
+    return (
+      <div className="py-8 text-center">
+        <p className="text-[12.5px] text-fg-muted">
+          {loading ? '正在加载版式…' : '该版本没有版式数据。'}
+        </p>
+        {!loading ? (
+          <p className="mt-1 text-[11.5px] text-fg-subtle">
+            {missing ? '把这份 .docx 重新入库一次即可生成版式。' : ''}
+          </p>
+        ) : null}
+      </div>
+    )
+  }
+
+  const page: PageSetup = slice.page
+  return (
+    <div className="py-3">
+      <div
+        className="mx-auto bg-white text-neutral-900 shadow-[0_2px_12px_rgba(0,0,0,0.18)] ring-1 ring-black/10"
+        style={{
+          width: px(page.widthTwips),
+          minHeight: px(page.heightTwips),
+          paddingTop: px(page.marginTopTwips),
+          paddingBottom: px(page.marginBottomTwips),
+          paddingLeft: px(page.marginLeftTwips),
+          paddingRight: px(page.marginRightTwips),
+        }}
+      >
+        {slice.blocks.map((block, idx) => (
+          <DocBlock key={`${block.anchor}:${idx}`} block={block} ctx={ctx} />
+        ))}
+      </div>
+      <div className="mt-2 text-center font-mono text-[10.5px] tabular-nums text-fg-subtle">
+        {slice.paraCount} 段 · {slice.tableCount} 表 · v{slice.rev}
+        {slice.hasMore ? ` · 已载入前 ${slice.blocks.length}/${slice.total} 块` : ''}
+      </div>
+    </div>
+  )
+}
+
+function DocBlock({ block, ctx }: { block: RenderBlock; ctx: BlockCtx }) {
+  const node = ctx.nodeByAnchor.get(block.anchor) ?? null
+  const focused = ctx.focusedAnchor === block.anchor
+  const editing = node !== null && ctx.editingAnchor === node.anchorId
+  const refs = ctx.refsByAnchor.get(block.anchor) ?? []
+
+  if (block.kind === 'page_break') {
+    return (
+      <div
+        ref={(el) => ctx.registerRef(block.anchor, el)}
+        className="my-3 flex items-center gap-2 text-[10px] text-neutral-400"
+      >
+        <span className="h-px flex-1 bg-neutral-300" />
+        分页
+        <span className="h-px flex-1 bg-neutral-300" />
+      </div>
+    )
+  }
+
+  return (
+    <div
+      ref={(el) => ctx.registerRef(block.anchor, el)}
+      className={
+        'group relative ' + (focused ? 'rounded-[3px] bg-amber-100/60 ring-1 ring-amber-400' : '')
+      }
+    >
+      {node ? (
+        <div className="pointer-events-none absolute right-0 top-0 z-10 flex translate-y-[-60%] items-center gap-1 rounded-full border border-neutral-300 bg-white/95 px-1.5 py-0.5 text-[10px] text-neutral-500 opacity-0 shadow-sm transition-opacity group-hover:pointer-events-auto group-hover:opacity-100">
+          <span className="font-mono tabular-nums">{node.anchorId}</span>
+          {node.mandatoryTags.length > 0 ? (
+            <span className="font-medium text-amber-600">{node.mandatoryTags.join('/')}</span>
+          ) : null}
+          {refs.length > 0 ? <span className="text-brand">引用 {refs.join('、')}</span> : null}
+          <button
+            type="button"
+            onClick={() => ctx.onToggleLock(node)}
+            title={node.locked ? '已锁定，点击解锁' : '锁定关键条款防误改'}
+            className={
+              'inline-flex items-center gap-0.5 ' +
+              (node.locked ? 'font-medium text-amber-600' : 'hover:text-neutral-900')
+            }
+          >
+            {node.locked ? <Lock size={10} /> : <Unlock size={10} />}
+            {node.locked ? '已锁' : '锁定'}
+          </button>
+          {block.kind === 'para' && node.xmlLocator.startsWith('p:') ? (
+            <button
+              type="button"
+              onClick={() => ctx.onStartEdit(node)}
+              className="inline-flex items-center gap-0.5 hover:text-neutral-900"
+            >
+              <Pencil size={10} />
+              修订
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+
+      {block.kind === 'table' && block.table ? (
+        <DocTable table={block.table} />
+      ) : block.para ? (
+        <DocPara para={block.para} />
+      ) : null}
+
+      {editing && node ? (
+        <div className="my-1.5 space-y-2 rounded-[6px] border border-brand/50 bg-white p-2">
+          <textarea
+            rows={3}
+            value={ctx.editDraft}
+            onChange={(e) => ctx.onDraftChange(e.target.value)}
+            className="w-full rounded-[6px] border border-neutral-300 px-2 py-1.5 text-[13px] leading-6 text-neutral-900 outline-none focus:border-brand"
+          />
+          <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
+            <div className="flex items-center gap-3 text-neutral-500">
+              <label className="inline-flex items-center gap-1">
+                <input
+                  type="radio"
+                  name="patchMode"
+                  checked={ctx.editMode === 'redline'}
+                  onChange={() => ctx.onModeChange('redline')}
+                  className="accent-[var(--brand)]"
+                />
+                修订红线
+              </label>
+              <label className="inline-flex items-center gap-1">
+                <input
+                  type="radio"
+                  name="patchMode"
+                  checked={ctx.editMode === 'clean'}
+                  onChange={() => ctx.onModeChange('clean')}
+                  className="accent-[var(--brand)]"
+                />
+                净稿覆盖
+              </label>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={ctx.onCancelEdit}
+                className="h-6 rounded-field border border-neutral-300 px-2 text-neutral-500 hover:text-neutral-900"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={() => ctx.onCommitEdit(node)}
+                className="inline-flex h-6 items-center gap-1 rounded-field bg-brand px-2 font-medium text-brand-fg hover:bg-brand-hover"
+              >
+                <Check size={11} />
+                保存版本
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   )
 }

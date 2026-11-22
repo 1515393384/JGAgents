@@ -20,6 +20,7 @@ use crate::doc::model::{
     PatchEditInput, MAX_DOCX_UPLOAD_BYTES,
 };
 use crate::doc::ooxml::{parse_docx_ast, patch_docx_zip, ParagraphPatch};
+use crate::doc::render::RenderSlice;
 use crate::engine::user::admin::UserAdminService;
 use crate::engine::user::gate::TokenGate;
 use crate::engine::user::model::{
@@ -274,6 +275,14 @@ struct DiffDocQuery {
 }
 
 #[derive(Deserialize)]
+struct RenderDocQuery {
+    rev: Option<i64>,
+    /// 块序号（`seq`）区间，闭区间；续接用上一片返回的 `lastSeq + 1`
+    from: Option<usize>,
+    to: Option<usize>,
+}
+
+#[derive(Deserialize)]
 struct LockNodeReq {
     locked: bool,
 }
@@ -447,6 +456,7 @@ where
                 .layer(DefaultBodyLimit::max(MULTIPART_LIMIT_BYTES)),
         )
         .route("/{id}/search", get(search_doc::<U, S, D, V, L, H, C>))
+        .route("/{id}/render", get(render_doc_slice::<U, S, D, V, L, H, C>))
         .route("/{id}/diff", get(diff_doc::<U, S, D, V, L, H, C>))
         .route("/{id}/patch", post(patch_doc::<U, S, D, V, L, H, C>))
         .route(
@@ -991,6 +1001,28 @@ where
         run_blocking(move || docs_store.search_doc_fts(&doc_id, &user.id, &query_str, limit))
             .await?;
     Ok(Json(DocSearchRes { hits }))
+}
+
+async fn render_doc_slice<U, S, D, V, L, H, C>(
+    State(state): State<AppState<U, S, D, V, L, H, C>>,
+    Extension(user): Extension<UserRecord>,
+    Path(doc_id): Path<String>,
+    Query(q): Query<RenderDocQuery>,
+) -> Result<Json<RenderSlice>, ApiError>
+where
+    U: UserStore + 'static,
+    S: SessionStore + 'static,
+    D: DocStore + 'static,
+    V: ConvStore + 'static,
+    L: LedgerStore + 'static,
+    H: HealthProbe + 'static,
+    C: Clock + 'static,
+{
+    let docs_store = Arc::clone(&state.docs);
+    let slice =
+        run_blocking(move || docs_store.get_render_slice(&doc_id, &user.id, q.rev, q.from, q.to))
+            .await?;
+    Ok(Json(slice))
 }
 
 async fn lock_doc_node<U, S, D, V, L, H, C>(

@@ -130,3 +130,27 @@ CREATE VIRTUAL TABLE IF NOT EXISTS doc_fts USING fts5(
     heading_path,
     text_content
 );
+
+CREATE TABLE IF NOT EXISTS doc_render_page (
+    doc_id TEXT NOT NULL,
+    rev INTEGER NOT NULL,
+    page_json TEXT NOT NULL,
+    block_count INTEGER NOT NULL DEFAULT 0,
+    para_count INTEGER NOT NULL DEFAULT 0,
+    table_count INTEGER NOT NULL DEFAULT 0,
+    break_count INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (doc_id, rev)
+);
+
+CREATE TABLE IF NOT EXISTS doc_render (
+    doc_id TEXT NOT NULL,
+    rev INTEGER NOT NULL,
+    seq INTEGER NOT NULL,
+    ord INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    heading_path TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    PRIMARY KEY (doc_id, rev, seq)
+);
+
+CREATE INDEX IF NOT EXISTS idx_doc_render_ord ON doc_render (doc_id, rev, ord);

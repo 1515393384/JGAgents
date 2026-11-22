@@ -3,7 +3,7 @@ use rusqlite::TransactionBehavior;
 use crate::core::error::EngineError;
 use crate::db::pool::{map_sqlite_err, SqlitePool};
 
-pub const CURRENT_SCHEMA_VERSION: i64 = 4;
+pub const CURRENT_SCHEMA_VERSION: i64 = 5;
 const BASELINE_SCHEMA: &str = include_str!("schema.sql");
 
 pub fn migrate(pool: &SqlitePool, now_ms: i64) -> Result<i64, EngineError> {
@@ -129,6 +129,33 @@ pub fn migrate(pool: &SqlitePool, now_ms: i64) -> Result<i64, EngineError> {
                      );",
                 )
                 .map_err(|e| map_sqlite_err(e, "migrate v3 to v4"))?;
+            }
+
+            if current < 5 {
+                tx.execute_batch(
+                    "CREATE TABLE IF NOT EXISTS doc_render_page (
+                         doc_id TEXT NOT NULL,
+                         rev INTEGER NOT NULL,
+                         page_json TEXT NOT NULL,
+                         block_count INTEGER NOT NULL DEFAULT 0,
+                         para_count INTEGER NOT NULL DEFAULT 0,
+                         table_count INTEGER NOT NULL DEFAULT 0,
+                         break_count INTEGER NOT NULL DEFAULT 0,
+                         PRIMARY KEY (doc_id, rev)
+                     );
+                     CREATE TABLE IF NOT EXISTS doc_render (
+                         doc_id TEXT NOT NULL,
+                         rev INTEGER NOT NULL,
+                         seq INTEGER NOT NULL,
+                         ord INTEGER NOT NULL,
+                         kind TEXT NOT NULL,
+                         heading_path TEXT NOT NULL,
+                         payload_json TEXT NOT NULL,
+                         PRIMARY KEY (doc_id, rev, seq)
+                     );
+                     CREATE INDEX IF NOT EXISTS idx_doc_render_ord ON doc_render (doc_id, rev, ord);",
+                )
+                .map_err(|e| map_sqlite_err(e, "migrate v4 to v5"))?;
             }
             if current < CURRENT_SCHEMA_VERSION {
                 tx.execute(

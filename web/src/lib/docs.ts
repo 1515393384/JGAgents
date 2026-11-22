@@ -102,6 +102,108 @@ export type DocDiffReport = {
   blocks: DiffBlock[]
 }
 
+// ── 渲染层（人看的版式，来自 /api/docs/{id}/render）─────────────────────────
+
+export type PageSetup = {
+  widthTwips: number
+  heightTwips: number
+  marginTopTwips: number
+  marginRightTwips: number
+  marginBottomTwips: number
+  marginLeftTwips: number
+  headerTwips: number
+  footerTwips: number
+  gutterTwips: number
+  landscape: boolean
+}
+
+export type RunFmt = {
+  bold: boolean
+  italic: boolean
+  underline: boolean
+  strike: boolean
+  sizeHalfPt: number
+  color: string
+  font: string
+  vertAlign: string
+  highlight: string
+}
+
+export type RunSpan = {
+  text: string
+  fmt: RunFmt
+}
+
+export type ParaFmt = {
+  styleId: string
+  align: string
+  indentLeftTwips: number
+  indentRightTwips: number
+  indentFirstLineTwips: number
+  spaceBeforeTwips: number
+  spaceAfterTwips: number
+  lineTwips: number
+  lineRule: string
+  numId: string
+  numLevel: number
+  headingLevel: number
+  keepNext: boolean
+  pageBreakBefore: boolean
+}
+
+export type RPara = {
+  ord: number
+  fmt: ParaFmt
+  runs: RunSpan[]
+}
+
+export type RTableCell = {
+  gridSpan: number
+  vMerge: string
+  widthTwips: number
+  paras: RPara[]
+}
+
+export type RTableRow = {
+  heightTwips: number
+  header: boolean
+  cells: RTableCell[]
+}
+
+export type RTable = {
+  firstOrd: number
+  grid: number[]
+  rows: RTableRow[]
+  widthTwips: number
+  align: string
+}
+
+export type RenderBlock = {
+  kind: 'para' | 'table' | 'page_break'
+  ord: number
+  anchor: string
+  headingLevel: number
+  headingPath: string
+  para?: RPara
+  table?: RTable
+}
+
+export type RenderSlice = {
+  docId: string
+  rev: number
+  page: PageSetup
+  blocks: RenderBlock[]
+  total: number
+  firstOrd: number
+  lastOrd: number
+  firstSeq: number
+  lastSeq: number
+  hasMore: boolean
+  paraCount: number
+  tableCount: number
+  pageBreakCount: number
+}
+
 export class DocClientError extends Error {
   status: number
   code: string
@@ -1308,6 +1410,25 @@ export async function toggleNodeLock(
   target.locked = locked
   found.detail.nodes = [...curNodes]
   return { ...target }
+}
+
+/**
+ * 取版式渲染切片。这是人看到的唯一视图，节点流不参与展示。
+ * 服务端没存渲染数据的版本（v5 之前入库）返回 null，由 UI 明确提示。
+ */
+export async function fetchDocRender(
+  docId: string,
+  opts: { rev?: number; from?: number; to?: number } = {},
+): Promise<RenderSlice | null> {
+  const qs = new URLSearchParams()
+  if (opts.rev !== undefined) qs.set('rev', String(opts.rev))
+  if (opts.from !== undefined) qs.set('from', String(opts.from))
+  if (opts.to !== undefined) qs.set('to', String(opts.to))
+  const q = qs.toString()
+  return tryDocJson<RenderSlice>(
+    `/api/docs/${encodeURIComponent(docId)}/render${q ? `?${q}` : ''}`,
+    { method: 'GET' },
+  )
 }
 
 export async function fetchDocDiff(

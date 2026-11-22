@@ -204,6 +204,161 @@ fn insert_nodes_and_fts(
     Ok(())
 }
 
+/// 渲染层入库。渲染层是唯一的人类阅读视图（节点流只服务检索与上下文装配），
+/// 但解析失败仍不阻断入库：语义层才是真源，宁可页面提示"该版本无渲染数据"也不丢文档。
+fn insert_render_blocks(
+    tx: &Transaction<'_>,
+    doc_id: &str,
+    rev: i64,
+    docx_blob: &[u8],
+) -> Result<(), EngineError> {
+    let rendered = match crate::doc::render::parse_rendered_doc(docx_blob) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(%doc_id, rev, error = %e, "doc render parse skipped");
+            return Ok(());
+        }
+    };
+
+    tx.execute(
+        "INSERT OR REPLACE INTO doc_render_page
+           (doc_id, rev, page_json, block_count, para_count, table_count, break_count)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        rusqlite::params![
+            doc_id,
+            rev,
+            serde_json::to_string(&rendered.page)
+                .map_err(|e| EngineError::internal(format!("page setup 序列化失败: {e}")))?,
+            rendered.blocks.len() as i64,
+            rendered.para_count as i64,
+            rendered.table_count as i64,
+            rendered.page_break_count as i64,
+        ],
+    )
+    .map_err(|e| map_sqlite_err(e, "insert doc_render_page"))?;
+
+    let mut stmt = tx
+        .prepare(
+            "INSERT OR REPLACE INTO doc_render (doc_id, rev, seq, ord, kind, heading_path, payload_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        )
+        .map_err(|e| map_sqlite_err(e, "prepare insert doc_render"))?;
+
+    for (seq, b) in rendered.blocks.iter().enumerate() {
+        let payload = serde_json::to_string(b)
+            .map_err(|e| EngineError::internal(format!("render block 序列化失败: {e}")))?;
+        stmt.execute(rusqlite::params![
+            doc_id,
+            rev,
+            seq as i64,
+            b.ord as i64,
+            b.kind,
+            b.heading_path,
+            payload,
+        ])
+        .map_err(|e| map_sqlite_err(e, "insert doc_render"))?;
+    }
+
+    Ok(())
+}
+
+/// 单次渲染切片上限：一屏通常几十块，600 足够覆盖长章节，又不至于把响应撑爆。
+const RENDER_SLICE_LIMIT: usize = 600;
+
+fn load_render_slice_with_conn(
+    conn: &rusqlite::Connection,
+    doc_id: &str,
+    rev: i64,
+    from_seq: usize,
+    to_seq: Option<usize>,
+    limit: usize,
+) -> Result<Option<crate::doc::render::RenderSlice>, EngineError> {
+    use crate::doc::render::{PageSetup, RenderBlock, RenderSlice};
+
+    let meta = conn
+        .query_row(
+            "SELECT page_json, block_count, para_count, table_count, break_count
+             FROM doc_render_page WHERE doc_id = ?1 AND rev = ?2",
+            rusqlite::params![doc_id, rev],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, i64>(4)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| map_sqlite_err(e, "query doc_render_page"))?;
+
+    let Some((page_json, total, para_count, table_count, break_count)) = meta else {
+        return Ok(None);
+    };
+
+    let page: PageSetup = serde_json::from_str(&page_json)
+        .map_err(|e| EngineError::internal(format!("page setup 反序列化失败: {e}")))?;
+
+    let hi = to_seq.unwrap_or(usize::MAX).min(i64::MAX as usize / 2) as i64;
+    let cap = limit.max(1);
+    let mut stmt = conn
+        .prepare(
+            "SELECT seq, payload_json FROM doc_render
+             WHERE doc_id = ?1 AND rev = ?2 AND seq >= ?3 AND seq <= ?4
+             ORDER BY seq LIMIT ?5",
+        )
+        .map_err(|e| map_sqlite_err(e, "prepare query doc_render"))?;
+
+    let rows = stmt
+        .query_map(
+            rusqlite::params![doc_id, rev, from_seq as i64, hi, (cap + 1) as i64],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
+        )
+        .map_err(|e| map_sqlite_err(e, "query doc_render"))?;
+
+    let mut blocks: Vec<RenderBlock> = Vec::new();
+    let mut has_more = false;
+    let mut first_seq: Option<usize> = None;
+    let mut last_seq: Option<usize> = None;
+    for row in rows {
+        let (seq, payload) = row.map_err(|e| map_sqlite_err(e, "read doc_render row"))?;
+        if blocks.len() >= cap {
+            has_more = true;
+            break;
+        }
+        let block: RenderBlock = serde_json::from_str(&payload)
+            .map_err(|e| EngineError::internal(format!("render block 反序列化失败: {e}")))?;
+        let seq = seq.max(0) as usize;
+        if first_seq.is_none() {
+            first_seq = Some(seq);
+        }
+        last_seq = Some(seq);
+        blocks.push(block);
+    }
+
+    let first_ord = blocks.first().map(|b| b.ord).unwrap_or(from_seq);
+    let last_ord = blocks.last().map(|b| b.ord).unwrap_or(from_seq);
+    let first_seq = first_seq.unwrap_or(from_seq);
+    let last_seq = last_seq.unwrap_or(first_seq);
+
+    Ok(Some(RenderSlice {
+        doc_id: doc_id.to_string(),
+        rev,
+        page,
+        blocks,
+        total: total.max(0) as usize,
+        first_ord,
+        last_ord,
+        first_seq,
+        last_seq,
+        has_more,
+        para_count: para_count.max(0) as usize,
+        table_count: table_count.max(0) as usize,
+        page_break_count: break_count.max(0) as usize,
+    }))
+}
+
 fn load_detail_with_conn(
     conn: &rusqlite::Connection,
     doc_id: &str,
@@ -347,6 +502,7 @@ impl DocStore for SqliteDocStore {
 
             let empty_locks = HashSet::new();
             insert_nodes_and_fts(&tx, &doc.id, rev.rev, parsed, &empty_locks)?;
+            insert_render_blocks(&tx, &doc.id, rev.rev, docx_blob)?;
 
             tx.commit().map_err(|e| map_sqlite_err(e, "commit create_doc"))?;
             load_detail_with_conn(conn, &doc.id, &doc.owner_user_id, Some(rev.rev))
@@ -435,6 +591,7 @@ impl DocStore for SqliteDocStore {
             .map_err(|e| map_sqlite_err(e, "update doc current_rev"))?;
 
             insert_nodes_and_fts(&tx, doc_id, next_rev, parsed, &locked_anchors)?;
+            insert_render_blocks(&tx, doc_id, next_rev, docx_blob)?;
 
             tx.commit().map_err(|e| map_sqlite_err(e, "commit append_revision"))?;
             load_detail_with_conn(conn, doc_id, owner_id, Some(next_rev))
@@ -779,6 +936,42 @@ impl DocStore for SqliteDocStore {
             Ok(out)
         })
     }
+
+    fn get_render_slice(
+        &self,
+        doc_id: &str,
+        owner_id: &UserId,
+        rev: Option<i64>,
+        from_seq: Option<usize>,
+        to_seq: Option<usize>,
+    ) -> Result<crate::doc::render::RenderSlice, EngineError> {
+        self.pool.with_reader(|conn| {
+            let (owner_raw, cur_rev): (String, i64) = conn
+                .query_row(
+                    "SELECT owner_user_id, current_rev FROM docs WHERE id = ?1",
+                    [doc_id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()
+                .map_err(|e| map_sqlite_err(e, "query doc for render"))?
+                .ok_or_else(|| EngineError::not_found("文档不存在"))?;
+
+            if owner_raw != owner_id.as_str() {
+                return Err(EngineError::forbidden("无权查看该文档"));
+            }
+
+            let target_rev = rev.unwrap_or(cur_rev);
+            load_render_slice_with_conn(
+                conn,
+                doc_id,
+                target_rev,
+                from_seq.unwrap_or(0),
+                to_seq,
+                RENDER_SLICE_LIMIT,
+            )?
+            .ok_or_else(|| EngineError::not_found("该版本暂无渲染数据"))
+        })
+    }
 }
 
 #[cfg(test)]
@@ -887,5 +1080,17 @@ mod tests {
             .expect("append revision");
         assert_eq!(next_detail.doc.current_rev, 2);
         assert!(next_detail.nodes[1].locked, "lock carried across revisions");
+
+        let slice = store
+            .get_render_slice(&doc.id, &owner, None, None, None)
+            .expect("render slice");
+        assert_eq!(slice.rev, 2);
+        assert_eq!(slice.blocks.len(), 2);
+        assert_eq!(slice.blocks[0].anchor, "p:0");
+        assert_eq!(slice.blocks[0].kind, "para");
+        let para = slice.blocks[0].para.as_ref().expect("para payload");
+        assert_eq!(para.runs.len(), 1);
+        assert_eq!(para.runs[0].text, "第三章 运维服务方案");
+        assert!(slice.page.width_twips > 0);
     }
 }

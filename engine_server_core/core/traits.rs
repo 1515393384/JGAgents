@@ -137,6 +137,15 @@ pub trait DocStore: Send + Sync {
         query: &str,
         limit: usize,
     ) -> Result<Vec<DocSearchHit>, EngineError>;
+    /// 取某版本的渲染切片。`from_seq`/`to_seq` 按块序裁剪，缺省从头取一页量。
+    fn get_render_slice(
+        &self,
+        doc_id: &str,
+        owner_id: &UserId,
+        rev: Option<i64>,
+        from_seq: Option<usize>,
+        to_seq: Option<usize>,
+    ) -> Result<crate::doc::render::RenderSlice, EngineError>;
 }
 
 pub trait ConvStore: Send + Sync {
