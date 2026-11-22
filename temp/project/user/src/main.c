@@ -113,6 +113,10 @@
 // 逐行连续性：本行边界与上一行相差超过该像素数就丢弃该行
 #define CONTINUITY_PX       18
 
+// 前瞻限幅：融合中心相对近场中心的偏移，最多不超过近场半宽的该比例。
+// 仿真验证：无限幅时弯道会按远端趋势多打约 19px（≈半个赛道宽），过度切内线
+#define LEAD_LIMIT_RATIO    0.35f
+
 volatile uint32_t g_tick_ms = 0;
 
 // 近场大津法：只统计视野下部，输出阈值、前后景对比度、白板像素占比
@@ -475,12 +479,14 @@ int main (void) {
 
             // 近场优先权重：车头正前方才是当前姿态，远端只用来看弯道趋势
             float weight;
-            if (row >= 96) {
-                weight = 1.9f;
-            } else if (row >= 72) {
-                weight = 1.4f;
+            if (row >= 100) {
+                weight = 2.2f;
+            } else if (row >= 88) {
+                weight = 1.6f;
+            } else if (row >= 74) {
+                weight = 0.8f;
             } else {
-                weight = 0.7f;
+                weight = 0.25f;
             }
 
             if (lf && rf) {
@@ -534,6 +540,16 @@ int main (void) {
         if (is_cross) {
             // 身处十字正中：保留少量进十字前的误差趋势，平稳直行
             center_x = HALF_W + 0.30f * last_valid_error;
+        } else {
+            // 前瞻限幅：允许按远端趋势提前打舵，但不许超过近场半宽的 LEAD_LIMIT_RATIO 倍，
+            // 否则急弯会按远端趋势过度切内线（仿真实测可多打约 19px）
+            float lead = center_x - (float)near_center;
+            float lim = LEAD_LIMIT_RATIO * near_half;
+            if (lead > lim) {
+                center_x = (float)near_center + lim;
+            } else if (lead < -lim) {
+                center_x = (float)near_center - lim;
+            }
         }
         center_x = clamp_float (center_x, -HALF_W, 1.5f * (float)MT9V03X_W);
 
