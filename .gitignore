@@ -24,3 +24,6 @@ Thumbs.db
 # 工具产物
 .aistudio/
 .openbitfun/
+
+# 外部参考仓库（只读，不入库）
+.ref/
