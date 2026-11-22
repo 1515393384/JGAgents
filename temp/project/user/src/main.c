@@ -61,9 +61,9 @@
 #define DEADBAND_PX         2.5f    // 中心小死区（像素），死区内线性收敛不留阶跃
 
 #define base_speed          1600    // 直道基础占空比（满分 10000）
-#define turn_min_speed      1050    // 急弯最低保底占空比（防弯道降速过多堵转）
+#define turn_min_speed      900     // 急弯最低保底占空比（防弯道降速过多堵转）
 #define max_speed           2200    // 最大限速保护
-#define TURN_SLOW_GAIN      4.5f    // 弯道减速系数：误差越大适当减速
+#define TURN_SLOW_GAIN      7.0f    // 弯道减速系数：误差越大适当减速（原来 4.5 太弱，急弯来不及收速）
 #define SPEED_RAMP_STEP     90      // 电机占空比每帧最大变化量（消除停-走冲击）
 
 // ── 图像识别参数（适配 45.5cm 白底蓝垫跑道）────────────────────────────────────
