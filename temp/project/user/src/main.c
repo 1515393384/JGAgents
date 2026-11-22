@@ -48,13 +48,6 @@
  * step 4 闭环控制：按实测半宽归一化 PD + 弯道自减速 + 丢线保持
  * step 5 状态显示：每 10 帧刷新 TFT 遥测
  *
- * 本轮相对上一版的关键修正（对应实测“抽搐 / 一直 LOST 闪烁 / 反打 / 直线不走 / 弯道更剧烈”）：
- * 1 边缘判定从“连续2个暗像素”提高到“连续3个暗像素”，白带上的拼缝/脏点/胶带不再被当成赛道边
- * 2 新增逐行连续性约束：本行 l/r 与上一行相差超过 CONTINUITY_PX 就丢弃该行，不污染中心
- * 3 赛道像素宽度改为“近场基准行实测”驱动，不再用写死的 62/32 先验 —— 装高、45.5cm 都能自适应
- * 4 转向误差用实测半宽做分母，误差半个赛道宽才顶满舵
- * 5 权重改为近场优先（车头正前方才是当前姿态），弯道不再提前打死
- * 6 base_speed 1350 -> 3000：13.5% 占空比带不动这车重，直线“走两步停一下”
  */
 #include "zf_common_headfile.h"
 
@@ -118,29 +111,6 @@
 // 前瞻限幅：融合中心相对近场中心的偏移，最多不超过近场半宽的该比例。
 // 仿真验证：无限幅时弯道会按远端趋势多打约 19px（≈半个赛道宽），过度切内线
 #define LEAD_LIMIT_RATIO    0.35f
-
-// ── 左右边界分离滤波 ───────────────────────────────────────────────────────
-// 左右各自维护一条跨帧平滑轨迹，中心 = (左+右)/2。
-// 单侧被脏点/阴影打断时，另一侧仍能稳住一半中心；比“所有行合成一个数”抗噪。
-// 只在直道特征（双边行占比高）时更新，弯道大量单边外推会让平滑值滞后。
-#define LR_SMOOTH_ALPHA     0.45f   // 左右分离滤波系数
-#define LR_STRAIGHT_BOTH    0.70f   // 双边行占比达到该值才认为直道，才更新左右平滑值
-#define USE_LR_FUSION       1       // 1=中心改用左右分离平滑值合成；0=退回“所有行中心加权平均”
-                                    // 仿真结论：直道 0.00px、单侧污渍 -1.42px，两版完全一致（中性）。
-                                    // 留着是为了现场单侧边线真的丢失时能兜一下，觉得没用改成 0 即可。
-
-// ── 舵机方向自动判定（只在上电低速窗口做一次探针）─────────────────────────
-// 打一个已知方向的修正量，看“误差是否按预期减小”：减小=符号正确，反而增大=符号反了。
-// 为什么不能常开：赛道上误差增大既可能是符号反，也可能是真的在过弯，
-// 常开必然在弯道误翻转，翻一次就彻底跑飞。所以这里限定
-//   上电后 CAL_WINDOW_FRAMES 帧内 / 低速 / 误差够大 / 直道特征明显 / 只做一次 / 丢线即放弃。
-// 默认关闭：方向错误属于一次性装配问题，人工看一眼“误差符号 vs 车实际转向”10 秒就能定。
-#define AUTO_SERVO_DIR      0       // 1=开启自动判定，0=直接用 SERVO_DIR 宏
-#define CAL_WINDOW_FRAMES   80      // 自动判定只在上电后这么多帧内尝试
-#define CAL_PROBE_TURN      45      // 探针打角（占 MAX_SERVO_TURN 的一小段）
-#define CAL_PROBE_FRAMES    6       // 探针持续帧数
-#define CAL_MIN_ERR         8.0f    // 误差小于该值没有足够信号，不探
-#define CAL_MIN_DELTA       3.0f    // 误差变化超过该值才敢下结论
 
 volatile uint32_t g_tick_ms = 0;
 
@@ -402,13 +372,6 @@ int main (void) {
     uint8_t state_drawn = 0xFF;     // 0=LOST 1=RUN 2=CROSS 3=HOLD
     float s_near_half = 55.0f;      // 赛道近场半宽的滑动估计（像素），由实测驱动
     int s_near_w = 0;               // 上一帧近场道宽，用于丢帧兜底
-    float s_left = 0.0f;            // 左边界分离平滑值
-    float s_right = 0.0f;           // 右边界分离平滑值
-    uint8_t s_lr_init = 0;
-    int8_t s_servo_dir = SERVO_DIR; // 实际使用的舵机方向（自动判定成功时会翻转）
-    uint8_t cal_state = 0;          // 0=待判定 1=探针中 2=已判定/已放弃
-    int cal_cnt = 0;
-    float cal_err0 = 0.0f;
 
     while (1) {
         // step 1 检测入口：等待摄像头新帧；超时无帧按丢线停车
@@ -489,10 +452,6 @@ int main (void) {
         int cross_rows = 0;
         int scan_cnt = 0;
 
-        // 左右边界分离累计（只用双边可信行）
-        float lsum = 0.0f, lwt = 0.0f, rsum = 0.0f, rwt = 0.0f;
-        int both_cnt = 0;
-
         int prev_l = near_l;
         int prev_r = near_r;
         int have_prev = (near_w >= NEAR_SEG_MIN_W);
@@ -539,11 +498,6 @@ int main (void) {
                 float c = 0.5f * (float)(l + r);
                 wsum += c * weight;
                 wtot += weight;
-                lsum += (float)l * weight;
-                lwt += weight;
-                rsum += (float)r * weight;
-                rwt += weight;
-                both_cnt++;
                 valid_cnt++;
                 prev_l = l;
                 prev_r = r;
@@ -586,28 +540,6 @@ int main (void) {
             // 身处十字正中：保留少量进十字前的误差趋势，平稳直行
             center_x = HALF_W + 0.30f * last_valid_error;
         } else {
-            // 直道特征明显时，改用左右分离平滑值合成中心：
-            // 某一侧被脏点/阴影/拼缝打断时，还能靠另一侧稳住中心。
-            if (USE_LR_FUSION && both_cnt > 0 && lwt > 0.0f && rwt > 0.0f
-                && (float)both_cnt >= LR_STRAIGHT_BOTH * (float)scan_cnt) {
-                float lm = lsum / lwt;
-                float rm = rsum / rwt;
-                if (!s_lr_init) {
-                    s_left = lm;
-                    s_right = rm;
-                    s_lr_init = 1;
-                } else {
-                    s_left += LR_SMOOTH_ALPHA * (lm - s_left);
-                    s_right += LR_SMOOTH_ALPHA * (rm - s_right);
-                }
-                float c_lr = 0.5f * (s_left + s_right);
-                // 平滑值离实测中心太远，说明正在入弯/出弯，平滑值滞后，不能用
-                float d_lr = c_lr - center_x;
-                if (d_lr < 0.0f) d_lr = -d_lr;
-                if (d_lr < 0.6f * near_half) {
-                    center_x = c_lr;
-                }
-            }
             // 前瞻限幅：允许按远端趋势提前打舵，但不许超过近场半宽的 LEAD_LIMIT_RATIO 倍，
             // 否则急弯会按远端趋势过度切内线（仿真实测可多打约 19px）
             float lead = center_x - (float)near_center;
@@ -640,34 +572,6 @@ int main (void) {
 
             // 连续死区：死区边界处从 0 平滑接上，不留阶跃
             float abs_err = filt_error >= 0.0f ? filt_error : -filt_error;
-
-            // step 3.5 舵机方向自动判定（可选，只在上电低速窗口做一次探针）
-            if (AUTO_SERVO_DIR) {
-                if (cal_state == 0) {
-                    // 触发条件全部满足才敢探：上电窗口内 + 低速 + 直道特征明显 + 误差够大
-                    if (frame_cnt <= CAL_WINDOW_FRAMES
-                        && speed_cmd <= (base_speed * 40 / 100)
-                        && both_cnt > 0
-                        && (float)both_cnt >= LR_STRAIGHT_BOTH * (float)scan_cnt
-                        && abs_err >= CAL_MIN_ERR) {
-                        cal_state = 1;
-                        cal_cnt = 0;
-                        cal_err0 = filt_error;
-                    }
-                } else if (cal_state == 1) {
-                    cal_cnt++;
-                    if (cal_cnt >= CAL_PROBE_FRAMES) {
-                        float delta = filt_error - cal_err0;
-                        // 朝纠正方向打舵后误差应朝 0 收；同号且明显变大 → 符号反了
-                        if (delta * cal_err0 > 0.0f
-                            && (delta > CAL_MIN_DELTA || delta < -CAL_MIN_DELTA)) {
-                            s_servo_dir = (int8_t)(-s_servo_dir);
-                        }
-                        cal_state = 2;
-                    }
-                }
-            }
-
             float eff_error = 0.0f;
             float dz = DEADBAND_PX;
             if (abs_err > dz) {
@@ -682,12 +586,8 @@ int main (void) {
             prev_error = eff_error;
 
             float d_term = clamp_float (KD_NORM * d_norm, -D_TERM_LIMIT, D_TERM_LIMIT);
-            float servo_turn = (KP_NORM * norm_e + d_term) * (float)MAX_SERVO_TURN * (float)s_servo_dir;
+            float servo_turn = (KP_NORM * norm_e + d_term) * (float)MAX_SERVO_TURN * (float)SERVO_DIR;
             servo_turn = clamp_float (servo_turn, -(float)MAX_SERVO_TURN, (float)MAX_SERVO_TURN);
-            if (AUTO_SERVO_DIR && cal_state == 1) {
-                // 探针覆盖：朝当前认定的纠正方向固定打一个小角
-                servo_turn = (float)(s_servo_dir * CAL_PROBE_TURN);
-            }
             pwm_set_duty (servo, (uint32)(servo_center + (int)servo_turn));
 
             float absn = norm_e >= 0.0f ? norm_e : -norm_e;
@@ -701,10 +601,6 @@ int main (void) {
             pwm_set_duty (motor2_in1, 0);
             pwm_set_duty (motor2_in2, (uint32)speed_cmd);
         } else {
-            // 探针期间丢线：数据不可信，直接放弃本次自动判定，永不再试
-            if (cal_state == 1) {
-                cal_state = 2;
-            }
             // 丢线不再立刻断电：短时间内保持舵机 + 低速滑行
             if (lost_frames < 250) {
                 lost_frames++;
@@ -763,9 +659,6 @@ int main (void) {
             tft180_show_int (16, 48, (int)image_error, 4);
             tft180_show_string (56, 48, "x=");
             tft180_show_uint (72, 48, (uint32)cross_rows, 2);
-            // D= 实际生效的舵机方向；e= 为正表示赛道中心在画面右侧，应向右打舵
-            tft180_show_string (96, 48, "D=");
-            tft180_show_string (112, 48, (s_servo_dir > 0) ? "+" : "-");
             tft180_show_string (0, 64, "n=");
             tft180_show_uint (16, 64, frame_cnt, 6);
         }
