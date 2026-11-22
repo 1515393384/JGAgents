@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from '@tanstack/react-router'
 import { ArrowRight, Eye, EyeOff } from 'lucide-react'
+import { useAuth } from '../../app/auth-context'
 import { Button } from '../../components/ui'
+import { loginWithPassword, registerWithPassword } from '../../lib/auth'
 
 const strengthOf = (pw: string) => {
   let s = 0
@@ -18,6 +20,7 @@ const strengthColor = ['bg-danger', 'bg-danger', 'bg-warn', 'bg-brand', 'bg-ok']
 /** 登录 / 注册是同一张卡的正反面：点一下翻过来，不跳页 */
 export function AuthCard() {
   const navigate = useNavigate()
+  const { setAuthenticatedUser } = useAuth()
   const [flipped, setFlipped] = useState(false)
   const [heights, setHeights] = useState({ front: 0, back: 0 })
   const front = useRef<HTMLDivElement | null>(null)
@@ -61,7 +64,10 @@ export function AuthCard() {
         >
           <LoginFace
             onFlip={() => setFlipped(true)}
-            onSubmit={() => void navigate({ to: '/' })}
+            onSuccess={(user) => {
+              setAuthenticatedUser(user)
+              void navigate({ to: '/', replace: true })
+            }}
           />
         </div>
 
@@ -73,7 +79,10 @@ export function AuthCard() {
         >
           <RegisterFace
             onFlip={() => setFlipped(false)}
-            onSubmit={() => void navigate({ to: '/' })}
+            onSuccess={(user) => {
+              setAuthenticatedUser(user)
+              void navigate({ to: '/', replace: true })
+            }}
           />
         </div>
       </div>
@@ -81,26 +90,48 @@ export function AuthCard() {
   )
 }
 
-function LoginFace({ onFlip, onSubmit }: { onFlip: () => void; onSubmit: () => void }) {
+function LoginFace({
+  onFlip,
+  onSuccess,
+}: {
+  onFlip: () => void
+  onSuccess: (user: Awaited<ReturnType<typeof loginWithPassword>>) => void
+}) {
+  const [username, setUsername] = useState('chen.mo')
+  const [password, setPassword] = useState('')
+  const [remember, setRemember] = useState(true)
   const [show, setShow] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (busy) return
+    setError(null)
+    setBusy(true)
+    try {
+      const user = await loginWithPassword(username, password, remember)
+      onSuccess(user)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '登录失败，请稍后重试')
+    } finally {
+      setBusy(false)
+    }
+  }
+
   return (
     <>
       <h2 className="text-lg font-medium tracking-tight">登录工作台</h2>
       <p className="mt-1 text-xs text-fg-muted">使用分配给你的账号；模型由架阁提供，也可自备。</p>
 
-      <form
-        className="mt-5 space-y-3"
-        onSubmit={(e) => {
-          e.preventDefault()
-          onSubmit()
-        }}
-      >
+      <form className="mt-5 space-y-3" onSubmit={(e) => void handleSubmit(e)}>
         <label className="block">
           <span className="mb-1.5 block text-xs text-fg-muted">用户名</span>
           <input
             name="username"
             autoComplete="username"
-            defaultValue="chen.mo"
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
             className="glass-field h-10 w-full rounded-field border border-border px-3 text-sm outline-none transition-colors focus:border-brand"
           />
         </label>
@@ -112,6 +143,8 @@ function LoginFace({ onFlip, onSubmit }: { onFlip: () => void; onSubmit: () => v
               name="password"
               type={show ? 'text' : 'password'}
               autoComplete="current-password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
               className="glass-field h-10 w-full rounded-field border border-border px-3 pr-10 text-sm outline-none transition-colors focus:border-brand"
             />
             <button
@@ -126,12 +159,33 @@ function LoginFace({ onFlip, onSubmit }: { onFlip: () => void; onSubmit: () => v
         </label>
 
         <label className="inline-flex items-center gap-1.5 pt-1 text-xs text-fg-muted">
-          <input type="checkbox" defaultChecked className="accent-[var(--brand)]" />
+          <input
+            type="checkbox"
+            checked={remember}
+            onChange={(e) => setRemember(e.target.checked)}
+            className="accent-[var(--brand)]"
+          />
           记住我
         </label>
 
-        <Button type="submit" pill size="lg" variant="primary" className="w-full">
-          进入
+        {error ? (
+          <div
+            role="alert"
+            className="rounded-field border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger"
+          >
+            {error}
+          </div>
+        ) : null}
+
+        <Button
+          type="submit"
+          pill
+          size="lg"
+          variant="primary"
+          className="w-full"
+          disabled={busy || !username.trim() || !password}
+        >
+          {busy ? '正在验证…' : '进入'}
           <ArrowRight size={15} />
         </Button>
       </form>
@@ -140,7 +194,10 @@ function LoginFace({ onFlip, onSubmit }: { onFlip: () => void; onSubmit: () => v
         还没有账号？
         <button
           type="button"
-          onClick={onFlip}
+          onClick={() => {
+            setError(null)
+            onFlip()
+          }}
           className="ml-1 font-medium text-brand hover:underline"
         >
           注册
@@ -150,25 +207,42 @@ function LoginFace({ onFlip, onSubmit }: { onFlip: () => void; onSubmit: () => v
   )
 }
 
-function RegisterFace({ onFlip, onSubmit }: { onFlip: () => void; onSubmit: () => void }) {
+function RegisterFace({
+  onFlip,
+  onSuccess,
+}: {
+  onFlip: () => void
+  onSuccess: (user: Awaited<ReturnType<typeof registerWithPassword>>) => void
+}) {
   const [name, setName] = useState('')
   const [pw, setPw] = useState('')
   const [show, setShow] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
   const s = strengthOf(pw)
   const ok = name.trim().length > 0 && pw.length >= 12
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!ok || busy) return
+    setError(null)
+    setBusy(true)
+    try {
+      const user = await registerWithPassword(name, pw)
+      onSuccess(user)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '注册失败，请稍后重试')
+    } finally {
+      setBusy(false)
+    }
+  }
 
   return (
     <>
       <h2 className="text-lg font-medium tracking-tight">创建账号</h2>
       <p className="mt-1 text-xs text-fg-muted">先开号，档位晚点再说：免费直接用，要升级随时升。</p>
 
-      <form
-        className="mt-4 space-y-3"
-        onSubmit={(e) => {
-          e.preventDefault()
-          if (ok) onSubmit()
-        }}
-      >
+      <form className="mt-4 space-y-3" onSubmit={(e) => void handleSubmit(e)}>
         <label className="block">
           <span className="mb-1.5 block text-xs text-fg-muted">用户名</span>
           <input
@@ -227,8 +301,17 @@ function RegisterFace({ onFlip, onSubmit }: { onFlip: () => void; onSubmit: () =
           </span>
         </label>
 
-        <Button type="submit" pill size="lg" variant="primary" className="w-full" disabled={!ok}>
-          创建账号
+        {error ? (
+          <div
+            role="alert"
+            className="rounded-field border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger"
+          >
+            {error}
+          </div>
+        ) : null}
+
+        <Button type="submit" pill size="lg" variant="primary" className="w-full" disabled={!ok || busy}>
+          {busy ? '正在创建…' : '创建账号'}
           <ArrowRight size={15} />
         </Button>
 
@@ -239,7 +322,14 @@ function RegisterFace({ onFlip, onSubmit }: { onFlip: () => void; onSubmit: () =
 
       <p className="mt-3 text-center text-xs text-fg-subtle">
         已有账号？
-        <button type="button" onClick={onFlip} className="ml-1 font-medium text-brand hover:underline">
+        <button
+          type="button"
+          onClick={() => {
+            setError(null)
+            onFlip()
+          }}
+          className="ml-1 font-medium text-brand hover:underline"
+        >
           登录
         </button>
       </p>

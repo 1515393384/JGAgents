@@ -77,10 +77,19 @@ pub struct UserRecord {
     pub role: UserRole,
     pub state: UserState,
     pub quota: UserQuota,
+    pub password_hash: String,
     pub token_hash: TokenHash,
     pub token_hint: String,
     pub created_at_ms: i64,
     pub last_active_ms: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionRecord {
+    pub token_hash: TokenHash,
+    pub user_id: UserId,
+    pub created_at_ms: i64,
+    pub expires_at_ms: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -66,6 +66,15 @@ impl TokenPepper {
         let tag = mac.finalize().into_bytes();
         TokenHash::from_hex(encode_hex(&tag))
     }
+
+    pub fn hash_session_token(&self, plain: &str) -> TokenHash {
+        let mut mac = HmacSha256::new_from_slice(&self.0)
+            .expect("HMAC-SHA256 accepts fixed 32-byte key");
+        mac.update(b"session:");
+        mac.update(plain.as_bytes());
+        let tag = mac.finalize().into_bytes();
+        TokenHash::from_hex(encode_hex(&tag))
+    }
 }
 
 pub fn generate_token() -> Result<(String, String), EngineError> {
@@ -78,6 +87,15 @@ pub fn generate_token() -> Result<(String, String), EngineError> {
     let plain = format!("jg_{hex}");
     let hint = format!("jg_{}", &hex[..4]);
     Ok((plain, hint))
+}
+
+pub fn generate_session_token() -> Result<String, EngineError> {
+    let mut raw = [0u8; TOKEN_BYTES];
+    getrandom::fill(&mut raw).map_err(|e| {
+        tracing::error!(error = %e, "csprng failed generating session token");
+        EngineError::internal("failed to generate session token")
+    })?;
+    Ok(format!("sess_{}", encode_hex(&raw)))
 }
 
 pub fn write_restricted_file(path: &Path, content: &[u8]) -> Result<(), EngineError> {

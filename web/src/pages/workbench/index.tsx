@@ -1,5 +1,6 @@
-import { useState } from 'react'
-import { useParams } from '@tanstack/react-router'
+import { useEffect, useState } from 'react'
+import { useNavigate, useParams } from '@tanstack/react-router'
+import { useAuth } from '../../app/auth-context'
 import { Composer } from './composer'
 import { ConversationList } from './conversation-list'
 import { Dock } from './dock'
@@ -19,12 +20,24 @@ type Win =
   | null
 
 export function WorkbenchPage() {
+  const navigate = useNavigate()
+  const { user, status } = useAuth()
   const [navOpen, setNavOpen] = useState(false)
   const [win, setWin] = useState<Win>({ kind: 'doc' })
   // / 落在个人空间；/s/:spaceId 才是显式空间
   const params = useParams({ strict: false }) as { spaceId?: string }
   const space = spaceOf(params.spaceId ?? 'me')
   const close = () => setWin(null)
+
+  useEffect(() => {
+    if (status === 'unauthenticated') {
+      void navigate({ to: '/login', replace: true })
+    }
+  }, [status, navigate])
+
+  if (status !== 'authenticated' || !user) {
+    return <div className="h-full bg-bg" />
+  }
 
   return (
     <div className="flex h-full min-h-0 bg-bg">
@@ -41,7 +54,7 @@ export function WorkbenchPage() {
         onOpenTemplate={(label) => setWin({ kind: 'tpl', label })}
       />
 
-      <DocCard open={win?.kind === 'doc'} onClose={close} />
+      <DocCard open={win?.kind === 'doc'} spaceId={space.id} onClose={close} />
       <SpaceRoot open={win?.kind === 'root'} onClose={close} />
       <SpaceCreate open={win?.kind === 'space'} onClose={close} />
       <TemplateWindow

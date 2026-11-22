@@ -54,6 +54,7 @@ impl<'a, S: UserStore, C: Clock> UserAdminService<'a, S, C> {
                 used_requests: 0,
                 used_tokens: 0,
             },
+            password_hash: String::new(),
             token_hash,
             token_hint,
             created_at_ms: now,

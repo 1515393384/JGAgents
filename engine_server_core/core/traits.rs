@@ -1,7 +1,10 @@
 use crate::core::error::EngineError;
 use crate::core::ids::{ConvId, EndpointId, TokenHash, UserId};
+use crate::doc::model::{
+    DocDetail, DocNodeRecord, DocRecord, DocRevisionMeta, DocSearchHit, ExportMode, ParsedDocx,
+};
 use crate::engine::user::model::{
-    UpdateUserInput, UserMetrics, UserPage, UserQuery, UserRecord, UserState,
+    SessionRecord, UpdateUserInput, UserMetrics, UserPage, UserQuery, UserRecord, UserState,
 };
 
 pub trait Clock: Send + Sync {
@@ -46,8 +49,11 @@ pub trait UserStore: Send + Sync {
     fn query(&self, query: &UserQuery) -> Result<UserPage, EngineError>;
     fn metrics(&self) -> Result<UserMetrics, EngineError>;
     fn get_by_id(&self, id: &UserId) -> Result<Option<UserRecord>, EngineError>;
+    fn find_by_name(&self, name: &str) -> Result<Vec<UserRecord>, EngineError>;
     fn get_by_token_hash(&self, hash: &TokenHash) -> Result<Option<UserRecord>, EngineError>;
     fn insert(&self, user: &UserRecord) -> Result<(), EngineError>;
+    fn register_member_atomic(&self, user: &UserRecord) -> Result<(), EngineError>;
+    fn touch_last_active(&self, id: &UserId, now_ms: i64) -> Result<(), EngineError>;
     fn update_atomic(&self, id: &UserId, patch: &UpdateUserInput)
         -> Result<UserRecord, EngineError>;
     fn rotate_token_atomic(
@@ -62,6 +68,75 @@ pub trait UserStore: Send + Sync {
         state: UserState,
     ) -> Result<usize, EngineError>;
     fn delete_atomic(&self, id: &UserId) -> Result<(), EngineError>;
+}
+
+pub trait SessionStore: Send + Sync {
+    fn create(&self, session: &SessionRecord) -> Result<(), EngineError>;
+    fn get_valid(&self, token_hash: &TokenHash, now_ms: i64)
+        -> Result<Option<SessionRecord>, EngineError>;
+    fn delete(&self, token_hash: &TokenHash) -> Result<(), EngineError>;
+    fn delete_for_user(&self, user_id: &UserId) -> Result<(), EngineError>;
+}
+
+pub trait DocStore: Send + Sync {
+    fn create_doc(
+        &self,
+        doc: &DocRecord,
+        rev: &DocRevisionMeta,
+        docx_blob: &[u8],
+        parsed: &ParsedDocx,
+    ) -> Result<DocDetail, EngineError>;
+    #[allow(clippy::too_many_arguments)]
+    fn append_revision(
+        &self,
+        doc_id: &str,
+        owner_id: &UserId,
+        note: &str,
+        author_name: &str,
+        export_mode: ExportMode,
+        docx_blob: &[u8],
+        parsed: &ParsedDocx,
+        carry_locks_from_rev: Option<i64>,
+        now_ms: i64,
+    ) -> Result<DocDetail, EngineError>;
+    fn list_docs(
+        &self,
+        owner_id: &UserId,
+        space_id: Option<&str>,
+    ) -> Result<Vec<DocRecord>, EngineError>;
+    fn get_doc_detail(
+        &self,
+        doc_id: &str,
+        owner_id: &UserId,
+        rev: Option<i64>,
+    ) -> Result<DocDetail, EngineError>;
+    fn get_revision_blob(
+        &self,
+        doc_id: &str,
+        owner_id: &UserId,
+        rev: i64,
+    ) -> Result<(DocRecord, DocRevisionMeta, Vec<u8>), EngineError>;
+    fn get_revision_nodes(
+        &self,
+        doc_id: &str,
+        owner_id: &UserId,
+        rev: i64,
+    ) -> Result<Vec<DocNodeRecord>, EngineError>;
+    fn set_node_locked(
+        &self,
+        doc_id: &str,
+        owner_id: &UserId,
+        anchor_id: &str,
+        locked: bool,
+        now_ms: i64,
+    ) -> Result<DocNodeRecord, EngineError>;
+    fn search_doc_fts(
+        &self,
+        doc_id: &str,
+        owner_id: &UserId,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<DocSearchHit>, EngineError>;
 }
 
 pub trait ConvStore: Send + Sync {

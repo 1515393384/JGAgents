@@ -1,6 +1,7 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { RouterProvider } from '@tanstack/react-router'
+import { AuthProvider } from './app/auth-context'
 import { ErrorBoundary } from './app/error-boundary'
 import { router } from './app/router'
 import './index.css'
@@ -11,7 +12,9 @@ if (!host) throw new Error('#root missing')
 createRoot(host).render(
   <StrictMode>
     <ErrorBoundary>
-      <RouterProvider router={router} />
+      <AuthProvider>
+        <RouterProvider router={router} />
+      </AuthProvider>
     </ErrorBoundary>
   </StrictMode>,
 )

@@ -6,10 +6,12 @@ use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
 
 use engine_server_core::core::traits::Clock;
+use engine_server_core::db::docs::SqliteDocStore;
 use engine_server_core::db::ledger::SqliteLedgerStore;
 use engine_server_core::db::migrate::migrate;
 use engine_server_core::db::msgs::SqliteConvStore;
 use engine_server_core::db::pool::SqlitePool;
+use engine_server_core::db::sessions::SqliteSessionStore;
 use engine_server_core::db::users::SqliteUserStore;
 use engine_server_core::engine::server::conn::ConnRegistry;
 use engine_server_core::engine::server::http::{build_router, AppState};
@@ -59,6 +61,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!(%db_path, schema_ver, "sqlite initialized");
 
     let users = Arc::new(SqliteUserStore::new(Arc::clone(&pool)));
+    let sessions = Arc::new(SqliteSessionStore::new(Arc::clone(&pool)));
+    let docs = Arc::new(SqliteDocStore::new(Arc::clone(&pool)));
     let convs = Arc::new(SqliteConvStore::new(Arc::clone(&pool)));
     let ledger = Arc::new(SqliteLedgerStore::new(Arc::clone(&pool)));
     let health = Arc::clone(&pool);
@@ -83,6 +87,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let app = build_router(AppState {
         users,
+        sessions,
+        docs,
         convs,
         ledger,
         health,

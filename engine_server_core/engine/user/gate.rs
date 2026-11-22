@@ -76,6 +76,7 @@ mod tests {
                 used_requests,
                 used_tokens: 0,
             },
+            password_hash: String::new(),
             token_hash: pepper.hash_token(token_plain),
             token_hint: String::from("jg_test"),
             created_at_ms: 100,

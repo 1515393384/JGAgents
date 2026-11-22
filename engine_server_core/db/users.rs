@@ -13,7 +13,7 @@ use crate::engine::user::model::{
     UserState,
 };
 
-const USER_COLUMNS: &str = "id, name, grp, role, state, daily_requests, monthly_tokens, used_requests, used_tokens, token_hash, token_hint, created_at_ms, last_active_ms";
+const USER_COLUMNS: &str = "id, name, grp, role, state, daily_requests, monthly_tokens, used_requests, used_tokens, token_hash, token_hint, password_hash, created_at_ms, last_active_ms";
 
 pub struct SqliteUserStore {
     pool: Arc<SqlitePool>,
@@ -37,8 +37,9 @@ fn row_to_user(row: &Row<'_>) -> rusqlite::Result<UserRecord> {
     let used_tokens: i64 = row.get(8)?;
     let token_hash: String = row.get(9)?;
     let token_hint: String = row.get(10)?;
-    let created_at_ms: i64 = row.get(11)?;
-    let last_active_ms: i64 = row.get(12)?;
+    let password_hash: String = row.get(11)?;
+    let created_at_ms: i64 = row.get(12)?;
+    let last_active_ms: i64 = row.get(13)?;
 
     let role = UserRole::parse(&role_raw).unwrap_or(UserRole::Member);
     let state = UserState::parse(&state_raw).unwrap_or(UserState::Disabled);
@@ -55,6 +56,7 @@ fn row_to_user(row: &Row<'_>) -> rusqlite::Result<UserRecord> {
             used_requests: used_requests.max(0) as u64,
             used_tokens: used_tokens.max(0) as u64,
         },
+        password_hash,
         token_hash: TokenHash::from_hex(token_hash),
         token_hint,
         created_at_ms,
@@ -229,6 +231,25 @@ impl UserStore for SqliteUserStore {
         })
     }
 
+    fn find_by_name(&self, name: &str) -> Result<Vec<UserRecord>, EngineError> {
+        self.pool.with_reader(|conn| {
+            let sql = format!(
+                "SELECT {USER_COLUMNS} FROM users WHERE name = ?1 ORDER BY created_at_ms ASC"
+            );
+            let mut stmt = conn
+                .prepare(&sql)
+                .map_err(|e| map_sqlite_err(e, "prepare find user by name"))?;
+            let rows = stmt
+                .query_map([name], row_to_user)
+                .map_err(|e| map_sqlite_err(e, "execute find user by name"))?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row.map_err(|e| map_sqlite_err(e, "read find_by_name row"))?);
+            }
+            Ok(out)
+        })
+    }
+
     fn get_by_token_hash(&self, hash: &TokenHash) -> Result<Option<UserRecord>, EngineError> {
         self.pool.with_reader(|conn| {
             let sql = format!("SELECT {USER_COLUMNS} FROM users WHERE token_hash = ?1");
@@ -241,8 +262,8 @@ impl UserStore for SqliteUserStore {
     fn insert(&self, user: &UserRecord) -> Result<(), EngineError> {
         self.pool.with_writer(|conn| {
             conn.execute(
-                "INSERT INTO users (id, name, grp, role, state, daily_requests, monthly_tokens, used_requests, used_tokens, token_hash, token_hint, created_at_ms, last_active_ms)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                "INSERT INTO users (id, name, grp, role, state, daily_requests, monthly_tokens, used_requests, used_tokens, token_hash, token_hint, password_hash, created_at_ms, last_active_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                 rusqlite::params![
                     user.id.as_str(),
                     user.name,
@@ -255,11 +276,68 @@ impl UserStore for SqliteUserStore {
                     user.quota.used_tokens as i64,
                     user.token_hash.as_str(),
                     user.token_hint,
+                    user.password_hash,
                     user.created_at_ms,
                     user.last_active_ms,
                 ],
             )
             .map_err(|e| map_sqlite_err(e, "insert user"))?;
+            Ok(())
+        })
+    }
+
+    fn register_member_atomic(&self, user: &UserRecord) -> Result<(), EngineError> {
+        self.pool.with_writer(|conn| {
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|e| map_sqlite_err(e, "begin register member"))?;
+
+            let exists: i64 = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM users WHERE name = ?1)",
+                    [&user.name],
+                    |row| row.get(0),
+                )
+                .map_err(|e| map_sqlite_err(e, "check username availability"))?;
+            if exists != 0 {
+                return Err(EngineError::conflict("username already exists"));
+            }
+
+            tx.execute(
+                "INSERT INTO users (id, name, grp, role, state, daily_requests, monthly_tokens, used_requests, used_tokens, token_hash, token_hint, password_hash, created_at_ms, last_active_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                rusqlite::params![
+                    user.id.as_str(),
+                    user.name,
+                    user.group,
+                    user.role.as_str(),
+                    user.state.as_str(),
+                    user.quota.daily_requests as i64,
+                    user.quota.monthly_tokens as i64,
+                    user.quota.used_requests as i64,
+                    user.quota.used_tokens as i64,
+                    user.token_hash.as_str(),
+                    user.token_hint,
+                    user.password_hash,
+                    user.created_at_ms,
+                    user.last_active_ms,
+                ],
+            )
+            .map_err(|e| map_sqlite_err(e, "insert registered member"))?;
+
+            tx.commit()
+                .map_err(|e| map_sqlite_err(e, "commit register member"))?;
+            Ok(())
+        })
+    }
+
+    fn touch_last_active(&self, id: &UserId, now_ms: i64) -> Result<(), EngineError> {
+        self.pool.with_writer(|conn| {
+            conn.execute(
+                "UPDATE users SET last_active_ms = ?2 WHERE id = ?1",
+                rusqlite::params![id.as_str(), now_ms],
+            )
+            .map_err(|e| map_sqlite_err(e, "touch user last_active"))?;
             Ok(())
         })
     }
@@ -325,6 +403,11 @@ impl UserStore for SqliteUserStore {
                 ],
             )
             .map_err(|e| map_sqlite_err(e, "update user row"))?;
+
+            if user.state == UserState::Disabled {
+                tx.execute("DELETE FROM sessions WHERE user_id = ?1", [user.id.as_str()])
+                    .map_err(|e| map_sqlite_err(e, "revoke sessions on user disable"))?;
+            }
 
             tx.commit().map_err(|e| map_sqlite_err(e, "commit update user"))?;
             Ok(user)
@@ -419,6 +502,18 @@ impl UserStore for SqliteUserStore {
                 .execute(&update_sql, rusqlite::params_from_iter(params.iter()))
                 .map_err(|e| map_sqlite_err(e, "execute batch set state"))?;
 
+            if state == UserState::Disabled {
+                let del_placeholders: String = (1..=ids.len())
+                    .map(|idx| format!("?{idx}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let del_sql = format!("DELETE FROM sessions WHERE user_id IN ({del_placeholders})");
+                let del_params: Vec<Value> =
+                    ids.iter().map(|id| Value::Text(id.as_str().to_string())).collect();
+                tx.execute(&del_sql, rusqlite::params_from_iter(del_params.iter()))
+                    .map_err(|e| map_sqlite_err(e, "revoke sessions on batch disable"))?;
+            }
+
             tx.commit()
                 .map_err(|e| map_sqlite_err(e, "commit batch set state"))?;
             Ok(changed)
@@ -449,6 +544,8 @@ impl UserStore for SqliteUserStore {
                 return Err(EngineError::conflict("cannot delete last active admin"));
             }
 
+            tx.execute("DELETE FROM sessions WHERE user_id = ?1", [id.as_str()])
+                .map_err(|e| map_sqlite_err(e, "delete user sessions"))?;
             tx.execute("DELETE FROM users WHERE id = ?1", [id.as_str()])
                 .map_err(|e| map_sqlite_err(e, "delete user"))?;
 
@@ -614,6 +711,17 @@ impl UserStore for InMemoryUserStore {
         Ok(guard.get(id).cloned())
     }
 
+    fn find_by_name(&self, name: &str) -> Result<Vec<UserRecord>, EngineError> {
+        let guard = self
+            .rows
+            .read()
+            .map_err(|_| EngineError::internal("user store lock poisoned"))?;
+        let mut matched: Vec<UserRecord> =
+            guard.values().filter(|u| u.name == name).cloned().collect();
+        matched.sort_by_key(|u| u.created_at_ms);
+        Ok(matched)
+    }
+
     fn get_by_token_hash(&self, hash: &TokenHash) -> Result<Option<UserRecord>, EngineError> {
         let guard = self
             .rows
@@ -637,6 +745,29 @@ impl UserStore for InMemoryUserStore {
             ));
         }
         guard.insert(user.id.clone(), user.clone());
+        Ok(())
+    }
+
+    fn register_member_atomic(&self, user: &UserRecord) -> Result<(), EngineError> {
+        let mut guard = self
+            .rows
+            .write()
+            .map_err(|_| EngineError::internal("user store lock poisoned"))?;
+        if guard.contains_key(&user.id) || guard.values().any(|u| u.name == user.name) {
+            return Err(EngineError::conflict("username already exists"));
+        }
+        guard.insert(user.id.clone(), user.clone());
+        Ok(())
+    }
+
+    fn touch_last_active(&self, id: &UserId, now_ms: i64) -> Result<(), EngineError> {
+        let mut guard = self
+            .rows
+            .write()
+            .map_err(|_| EngineError::internal("user store lock poisoned"))?;
+        if let Some(user) = guard.get_mut(id) {
+            user.last_active_ms = now_ms;
+        }
         Ok(())
     }
 
