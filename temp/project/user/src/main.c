@@ -102,10 +102,9 @@
 
 #define HALF_W              (0.5f * (float)MT9V03X_W)
 
-// 近场基准行（从上到下三条候选，取能找到的最宽合理白段）
-#define SENSE_ROW_0         (MT9V03X_H - 8)
-#define SENSE_ROW_1         (MT9V03X_H - 20)
-#define SENSE_ROW_2         (MT9V03X_H - 34)
+// 近场基准行：从画面最下往上逐 6 行找，第一条能量到完整白段的行作为基准。
+// 写死行号在有车头/线束遮挡时会整体失效（仿真：遮挡 46 行即 0/30 全丢）
+#define SENSE_SCAN_STEP     6
 
 // 透视：近场半宽 -> 远端半宽的收缩比（越远越窄）
 #define PERSP_FAR_RATIO     0.60f
@@ -338,9 +337,13 @@ static int speed_ramp (int cur, int target) {
     return target;
 }
 
-// 近场半宽 -> 该扫描行的预期半宽（线性透视收缩）
-static float persp_half (float near_half, int row) {
-    float t = ((float)SENSE_ROW_0 - (float)row) / ((float)SENSE_ROW_0 - (float)SCAN_TOP_ROW);
+// 近场半宽 -> 该扫描行的预期半宽（线性透视收缩），基准行随遮挡自适应，需作为参数传入
+static float persp_half (float near_half, int base_row, int row) {
+    int den = base_row - SCAN_TOP_ROW;
+    if (den < 1) {
+        den = 1;
+    }
+    float t = ((float)base_row - (float)row) / (float)den;
     t = clamp_float (t, 0.0f, 1.0f);
     return near_half * (1.0f - (1.0f - PERSP_FAR_RATIO) * t);
 }
@@ -403,36 +406,33 @@ int main (void) {
             }
         }
 
-        // step 3.1 近场基准行：实测赛道宽度，作为本帧的像素尺度
+        // step 3.1 近场基准行：从下往上找第一条能量到完整白段的行，同时实测赛道像素宽度
         int near_w = 0;
         int near_l = 0;
         int near_r = MT9V03X_W - 1;
-        int sense_rows[3] = { SENSE_ROW_0, SENSE_ROW_1, SENSE_ROW_2 };
-        for (int s = 0; s < 3; s++) {
-            int row = sense_rows[s];
+        int base_row = SCAN_BOT_ROW;
+        for (int row = SCAN_BOT_ROW; row > SCAN_TOP_ROW; row -= SENSE_SCAN_STEP) {
             int l, r, lf, rf;
             int w = scan_row_seg (mt9v03x_image[row], MT9V03X_W, MT9V03X_W / 2, &l, &r, &lf, &rf);
-            // 只有“双边都塌实”或“一侧到边界”的宽段才可信
-            if (w >= NEAR_SEG_MIN_W && w <= MT9V03X_W) {
-                if (w > near_w) {
-                    near_w = w;
-                    near_l = l;
-                    near_r = r;
-                }
+            if (w >= NEAR_SEG_MIN_W) {
+                near_w = w;
+                near_l = l;
+                near_r = r;
+                base_row = row;
+                break;
             }
         }
         // 中心落进蓝区（车已偏出赛道）时，退化为全行最长白段
         if (near_w == 0) {
-            for (int s = 0; s < 3; s++) {
-                int row = sense_rows[s];
+            for (int row = SCAN_BOT_ROW; row > SCAN_TOP_ROW; row -= SENSE_SCAN_STEP) {
                 int l, r, lf, rf;
                 int w = scan_row_seg (mt9v03x_image[row], MT9V03X_W, -1, &l, &r, &lf, &rf);
                 if (w >= NEAR_SEG_MIN_W) {
-                    if (w > near_w) {
-                        near_w = w;
-                        near_l = l;
-                        near_r = r;
-                    }
+                    near_w = w;
+                    near_l = l;
+                    near_r = r;
+                    base_row = row;
+                    break;
                 }
             }
         }
@@ -454,16 +454,18 @@ int main (void) {
         float wtot = 0.0f;
         int valid_cnt = 0;
         int cross_rows = 0;
+        int scan_cnt = 0;
 
         int prev_l = near_l;
         int prev_r = near_r;
         int have_prev = (near_w >= NEAR_SEG_MIN_W);
 
         for (int i = 0; i < SCAN_ROWS; i++) {
-            int row = SCAN_BOT_ROW - i * SCAN_STEP;
+            int row = base_row - i * SCAN_STEP;
             if (row <= SCAN_TOP_ROW) {
                 break;
             }
+            scan_cnt++;
 
             int seed = have_prev ? ((prev_l + prev_r) / 2) : (MT9V03X_W / 2);
             seed = clamp_int (seed, 1, MT9V03X_W - 2);
@@ -474,7 +476,7 @@ int main (void) {
                 continue;
             }
 
-            float half_exp = persp_half (near_half, row);
+            float half_exp = persp_half (near_half, base_row, row);
             float max_ok_w = 2.4f * half_exp;
 
             // 近场优先权重：车头正前方才是当前姿态，远端只用来看弯道趋势
@@ -529,7 +531,8 @@ int main (void) {
         }
 
         // step 3.3 中心融合
-        uint8_t is_cross = ((float)cross_rows >= CROSS_ROWS_RATIO * (float)SCAN_ROWS);
+        uint8_t is_cross = (scan_cnt > 0
+                            && (float)cross_rows >= CROSS_ROWS_RATIO * (float)scan_cnt);
         float center_x = (float)near_center;
         if (valid_cnt >= 3 && wtot > 0.0f) {
             center_x = wsum / wtot;
@@ -553,9 +556,10 @@ int main (void) {
         }
         center_x = clamp_float (center_x, -HALF_W, 1.5f * (float)MT9V03X_W);
 
-        // 有效性：画面要有白带、近场要能量到宽度、并且找到了线
+        // 有效性：有点像样的前后景对比 + 近场确实量到白段 + 找到了线。
+        // 不再用整块 ROI 的白占比：车头/线束遮挡会让 ROI 内大片为黑，白占比被拉低后误判丢线
+        // （仿真：遮挡 46 行时白占比只剩 12%，old 判据直接 0/30 全失效，near_w 却是正常的 59）
         uint8_t image_ok = (otsu_contrast >= MIN_CONTRAST
-                            && white_pct >= NEAR_WHITE_MIN_PCT
                             && near_w >= NEAR_SEG_MIN_W
                             && (valid_cnt > 0 || is_cross));
 
